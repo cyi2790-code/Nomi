@@ -1,8 +1,8 @@
 import React from 'react'
 import { Group, Stack } from '@mantine/core'
-import type { ModelCatalogVendorAuthType, ModelCatalogVendorDto } from '../deps'
+import type { ModelCatalogVendorAuthType, ModelCatalogVendorDto, ModelCatalogVendorProviderKind } from '../deps'
 import { toast, upsertModelCatalogVendor } from '../deps'
-import { AUTH_TYPE_OPTIONS } from '../modelCatalog.constants'
+import { AUTH_TYPE_OPTIONS, PROVIDER_KIND_OPTIONS } from '../modelCatalog.constants'
 import { prettyJson, safeParseJson } from '../modelCatalog.utils'
 import { DesignButton, DesignModal, DesignSelect, DesignSwitch, DesignTextInput, DesignTextarea } from '../../../../../design'
 import { cn } from '../../../../../utils/cn'
@@ -28,6 +28,7 @@ export function VendorEditModal({
   const [vendorEnabled, setVendorEnabled] = React.useState(true)
   const [vendorBaseUrlHint, setVendorBaseUrlHint] = React.useState('')
   const [vendorAuthType, setVendorAuthType] = React.useState<ModelCatalogVendorAuthType>('bearer')
+  const [vendorProviderKind, setVendorProviderKind] = React.useState<ModelCatalogVendorProviderKind>('openai-compatible')
   const [vendorAuthHeader, setVendorAuthHeader] = React.useState('')
   const [vendorAuthQueryParam, setVendorAuthQueryParam] = React.useState('')
   const [vendorMeta, setVendorMeta] = React.useState('')
@@ -41,6 +42,7 @@ export function VendorEditModal({
       setVendorEnabled(true)
       setVendorBaseUrlHint('')
       setVendorAuthType('bearer')
+      setVendorProviderKind('openai-compatible')
       setVendorAuthHeader('')
       setVendorAuthQueryParam('')
       setVendorMeta('')
@@ -55,6 +57,7 @@ export function VendorEditModal({
       setVendorEnabled(!!editingVendor.enabled)
       setVendorBaseUrlHint((editingVendor.baseUrlHint || '').trim())
       setVendorAuthType(editingVendor.authType || 'bearer')
+      setVendorProviderKind(editingVendor.providerKind || 'openai-compatible')
       setVendorAuthHeader((editingVendor.authHeader || '').trim())
       setVendorAuthQueryParam((editingVendor.authQueryParam || '').trim())
       setVendorMeta(prettyJson(editingVendor.meta))
@@ -92,6 +95,7 @@ export function VendorEditModal({
         authType: vendorAuthType,
         authHeader: vendorAuthHeader.trim() || null,
         authQueryParam: vendorAuthQueryParam.trim() || null,
+        providerKind: vendorProviderKind,
         ...(typeof metaParsed.value === 'undefined' ? {} : { meta: metaParsed.value }),
       })
       toast('已保存厂商配置', 'success')
@@ -103,7 +107,7 @@ export function VendorEditModal({
     } finally {
       setSubmitting(false)
     }
-  }, [onClose, onSaved, submitting, vendorAuthHeader, vendorAuthQueryParam, vendorAuthType, vendorBaseUrlHint, vendorEnabled, vendorKey, vendorMeta, vendorName])
+  }, [onClose, onSaved, submitting, vendorAuthHeader, vendorAuthQueryParam, vendorAuthType, vendorBaseUrlHint, vendorEnabled, vendorKey, vendorMeta, vendorName, vendorProviderKind])
 
   return (
     <DesignModal className={cn('stats-model-catalog-vendor-modal')} opened={opened} onClose={onClose} title={isNew ? '新增厂商' : '编辑厂商'} size="md" radius="md" centered
@@ -117,6 +121,12 @@ export function VendorEditModal({
           data={AUTH_TYPE_OPTIONS}
           value={vendorAuthType}
           onChange={(value) => setVendorAuthType(value === 'x-api-key' || value === 'query' || value === 'none' ? value : 'bearer')}
+        />
+        <DesignSelect
+          label="Provider 类型（Agent 文本调用使用）"
+          data={PROVIDER_KIND_OPTIONS}
+          value={vendorProviderKind}
+          onChange={(value) => setVendorProviderKind(value === 'anthropic' ? 'anthropic' : 'openai-compatible')}
         />
         <DesignTextInput label="BaseUrl Hint（可选）" placeholder="例如 https://api.openai.com" value={vendorBaseUrlHint} onChange={(e) => setVendorBaseUrlHint(e.currentTarget.value)} />
         <DesignSwitch checked={vendorAdvanced} onChange={(e) => setVendorAdvanced(e.currentTarget.checked)} label="显示高级设置" />

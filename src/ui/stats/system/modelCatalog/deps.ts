@@ -26,6 +26,7 @@ export type {
   ModelCatalogMappingTestResultDto,
   ModelCatalogModelDto,
   ModelCatalogVendorAuthType,
+  ModelCatalogVendorProviderKind,
   ModelCatalogVendorDto,
   ProfileKind,
 } from '../../../../api/server'

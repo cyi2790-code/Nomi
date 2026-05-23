@@ -1,4 +1,4 @@
-import type { BillingModelKind, ModelCatalogImportPackageDto, ModelCatalogVendorAuthType, ProfileKind } from './deps'
+import type { BillingModelKind, ModelCatalogImportPackageDto, ModelCatalogVendorAuthType, ModelCatalogVendorProviderKind, ProfileKind } from './deps'
 
 export const DOC_TO_MODEL_CATALOG_ACTIVATION_PROMPT_ZH = `你是「Nomi 模型管理（系统级）」配置生成器。
 我会提供第三方厂商接口文档（可能是 Markdown / 链接 / 请求示例 / 响应示例）。
@@ -121,6 +121,11 @@ export const AUTH_TYPE_OPTIONS: Array<{ value: ModelCatalogVendorAuthType; label
   { value: 'x-api-key', label: 'x-api-key（X-API-Key）' },
   { value: 'query', label: 'query（?api_key=...）' },
   { value: 'none', label: 'none（无需鉴权）' },
+]
+
+export const PROVIDER_KIND_OPTIONS: Array<{ value: ModelCatalogVendorProviderKind; label: string }> = [
+  { value: 'openai-compatible', label: 'OpenAI Compatible（默认，适配 ChatFire / OpenAI / 聚合网关）' },
+  { value: 'anthropic', label: 'Anthropic（Claude Messages API）' },
 ]
 
 export const PAGE_SIZE_OPTIONS: Array<{ value: string; label: string }> = [

@@ -12,6 +12,7 @@ export type ProfileKind =
   | 'image_edit'
 
 export type ModelCatalogVendorAuthType = 'none' | 'bearer' | 'x-api-key' | 'query'
+export type ModelCatalogVendorProviderKind = 'openai-compatible' | 'anthropic'
 
 export type ModelCatalogIntegrationChannelKind =
   | 'official_provider'
@@ -61,6 +62,7 @@ export type ModelCatalogVendorDto = {
   authType?: ModelCatalogVendorAuthType
   authHeader?: string | null
   authQueryParam?: string | null
+  providerKind?: ModelCatalogVendorProviderKind
   meta?: unknown
   createdAt: string
   updatedAt: string
