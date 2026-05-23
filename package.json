@@ -14,7 +14,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:build": "pnpm run build",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "dist:mac:dir": "electron-builder --mac dir --arm64"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.2.12",
@@ -61,6 +62,7 @@
     "appId": "com.nomi.app",
     "productName": "Nomi",
     "npmRebuild": false,
+    "afterPack": "scripts/after-pack-mac.cjs",
     "asarUnpack": [
       "node_modules/@ffmpeg-installer/**",
       "node_modules/.pnpm/@ffmpeg-installer+*/**"
