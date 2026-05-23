@@ -104,11 +104,13 @@ describe("Nomi render manifest v1", () => {
   });
 
   it("rejects non-positive optional asset probe metadata", () => {
-    const invalidMetadataCases: Array<["durationSeconds" | "width" | "height" | "fps", number]> = [
+    const invalidMetadataCases: Array<["durationSeconds" | "width" | "height" | "fps" | "sampleRate" | "channels", number]> = [
       ["durationSeconds", 0],
       ["width", 0],
       ["height", -1],
       ["fps", 0],
+      ["sampleRate", 0],
+      ["channels", -1],
     ];
 
     invalidMetadataCases.forEach(([field, value]) => {

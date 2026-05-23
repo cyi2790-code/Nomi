@@ -28,6 +28,8 @@ export type NomiRenderAsset = {
   videoCodec?: string;
   audioCodec?: string;
   hasAudio?: boolean;
+  sampleRate?: number;
+  channels?: number;
 };
 
 export type NomiRenderTrack = {
@@ -195,6 +197,8 @@ function assertValidAsset(value: unknown, fieldName: string): asserts value is N
   assertOptionalString(value.videoCodec, `${fieldName}.videoCodec`);
   assertOptionalString(value.audioCodec, `${fieldName}.audioCodec`);
   assertOptionalBoolean(value.hasAudio, `${fieldName}.hasAudio`);
+  assertOptionalPositiveInteger(value.sampleRate, `${fieldName}.sampleRate`);
+  assertOptionalPositiveInteger(value.channels, `${fieldName}.channels`);
 }
 
 function assertClipAssetReferencesExist(tracks: NomiRenderTrack[], assets: Record<string, NomiRenderAsset>): void {
