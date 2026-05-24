@@ -27,6 +27,24 @@ export type TaskResultDto = {
   status: TaskStatus
   assets: TaskAssetDto[]
   raw: unknown
+  /**
+   * E11: Complete provenance for reproducibility. Populated by the electron
+   * runtime on successful generation. Renderer copies into
+   * GenerationNodeResult.provenance via extractProvenanceFromTaskResult.
+   */
+  provenance?: {
+    provider?: string
+    modelKey?: string
+    modelVersion?: string
+    prompt?: string
+    negativePrompt?: string
+    seed?: number
+    params?: Record<string, unknown>
+    vendorRequestId?: string
+    cost?: { amount: number; currency: string; unit: 'estimate' }
+    timestamp: number
+    agentRunId?: string
+  }
 }
 
 export type TaskRequestDto = {

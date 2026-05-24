@@ -17,6 +17,24 @@ export const generationNodeProgressSchema = z.object({
   updatedAt: z.number(),
 })
 
+export const generationProvenanceSchema = z.object({
+  provider: z.string().optional(),
+  modelKey: z.string().optional(),
+  modelVersion: z.string().optional(),
+  prompt: z.string().optional(),
+  negativePrompt: z.string().optional(),
+  seed: z.number().optional(),
+  params: z.record(z.unknown()).optional(),
+  vendorRequestId: z.string().optional(),
+  cost: z.object({
+    amount: z.number(),
+    currency: z.string(),
+    unit: z.literal('estimate'),
+  }).optional(),
+  timestamp: z.number(),
+  agentRunId: z.string().optional(),
+}).strict()
+
 export const generationNodeResultSchema = z.object({
   id: z.string().min(1),
   type: z.enum(['image', 'video', 'text']),
@@ -31,6 +49,7 @@ export const generationNodeResultSchema = z.object({
   assetRefId: z.string().optional(),
   raw: z.unknown().optional(),
   createdAt: z.number(),
+  provenance: generationProvenanceSchema.optional(),
 })
 
 export const generationNodeRunRecordSchema = z.object({

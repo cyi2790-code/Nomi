@@ -164,6 +164,21 @@ type TaskResult = {
     assetName?: string | null;
   }>;
   raw: unknown;
+  /**
+   * E11: Complete provenance for reproducibility. Populated on successful
+   * generation. Renderer copies this into GenerationNodeResult.provenance.
+   */
+  provenance?: {
+    provider?: string;
+    modelKey?: string;
+    prompt?: string;
+    negativePrompt?: string;
+    seed?: number;
+    params?: Record<string, unknown>;
+    vendorRequestId?: string;
+    cost?: { amount: number; currency: string; unit: "estimate" };
+    timestamp: number;
+  };
 };
 
 const PROJECT_FILE = "project.json";
@@ -2007,7 +2022,7 @@ export async function runTask(payload: unknown): Promise<TaskResult> {
     ? await localizeTaskAsset(projectId, assetUrl, type, nodeId)
     : { type, url: assetUrl, thumbnailUrl: type === "image" ? assetUrl : null };
   // E10: log cost estimate for the generation (best-effort)
-  logCostEntry({
+  const costEntry = logCostEntry({
     projectsRoot: getProjectsRoot(),
     projectId,
     nodeId,
@@ -2017,7 +2032,26 @@ export async function runTask(payload: unknown): Promise<TaskResult> {
     pixels: request.width && request.height ? request.width * request.height : undefined,
     vendorRequestId: upstreamTaskId,
   });
-  return { id: upstreamTaskId, kind, status: "succeeded", assets: [asset], raw: providerResponse };
+  // E11: provenance — captures everything needed to reproduce this exact
+  // generation months later (model + prompt + seed + params).
+  const provenance: NonNullable<TaskResult["provenance"]> = {
+    provider: vendor.key,
+    modelKey: model.modelAlias || model.modelKey,
+    prompt: request.prompt,
+    ...(request.negativePrompt ? { negativePrompt: request.negativePrompt } : {}),
+    ...(typeof request.seed === "number" ? { seed: request.seed } : {}),
+    params: {
+      ...(request.width != null ? { width: request.width } : {}),
+      ...(request.height != null ? { height: request.height } : {}),
+      ...(request.steps != null ? { steps: request.steps } : {}),
+      ...(request.cfgScale != null ? { cfgScale: request.cfgScale } : {}),
+      ...(request.extras ? { extras: request.extras } : {}),
+    },
+    vendorRequestId: upstreamTaskId,
+    ...(costEntry ? { cost: { amount: costEntry.cost, currency: "USD", unit: "estimate" as const } } : {}),
+    timestamp: Date.now(),
+  };
+  return { id: upstreamTaskId, kind, status: "succeeded", assets: [asset], raw: providerResponse, provenance };
 }
 
 export async function fetchTaskResult(payload: unknown): Promise<{ vendor: string; result: TaskResult }> {

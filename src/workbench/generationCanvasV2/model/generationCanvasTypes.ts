@@ -8,6 +8,29 @@ export type GenerationResultType = 'image' | 'video' | 'text'
 
 export type GenerationNodeTaskKind = 'text' | 'image' | 'video' | 'workflow' | 'asset' | 'unknown'
 
+/**
+ * Phase E Task E11 — Complete provenance record for a generated asset.
+ *
+ * Recorded at generation time so a user can: (a) see WHY a node looks
+ * the way it does (full prompt + params), (b) re-run with the same exact
+ * configuration months later to reproduce, (c) compare V1 vs V2 of the
+ * same shot. All fields optional for backward compatibility with legacy
+ * v0.4.0 results that don't have provenance.
+ */
+export type GenerationProvenance = {
+  provider?: string
+  modelKey?: string
+  modelVersion?: string
+  prompt?: string
+  negativePrompt?: string
+  seed?: number
+  params?: Record<string, unknown>
+  vendorRequestId?: string
+  cost?: { amount: number; currency: string; unit: 'estimate' }
+  timestamp: number
+  agentRunId?: string
+}
+
 export type GenerationNodeResult = {
   id: string
   type: GenerationResultType
@@ -22,6 +45,8 @@ export type GenerationNodeResult = {
   assetRefId?: string
   raw?: unknown
   createdAt: number
+  /** Phase E E11: Complete provenance for reproducibility. */
+  provenance?: GenerationProvenance
 }
 
 export type GenerationNodeProgress = {
