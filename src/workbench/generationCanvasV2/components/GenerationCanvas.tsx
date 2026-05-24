@@ -8,7 +8,7 @@ import CanvasToolbar, { NodeAddMenu } from './CanvasToolbar'
 import { importImageFilesToGenerationCanvas } from '../adapters/assetImportAdapter'
 import { getDesktopBridge } from '../../../desktop/bridge'
 import { EDGE_MODE_LABEL } from '../model/graphOps'
-import type { GenerationCanvasNode, GenerationNodeKind } from '../model/generationCanvasTypes'
+import type { GenerationCanvasNode, GenerationNodeKind, NodeGroup } from '../model/generationCanvasTypes'
 import { getGenerationNodeComponent } from '../nodes/renderRegistry'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'
 import { notifyModelOptionsRefresh, useModelOptionsState } from '../../../config/useModelOptions'
@@ -23,6 +23,9 @@ const WHEEL_ZOOM_FACTOR = 1.24
 const WHEEL_ZOOM_DELTA = 120
 const WHEEL_LINE_HEIGHT = 16
 const WHEEL_PAGE_HEIGHT = 800
+const GROUP_BOX_PADDING = 24
+const GROUP_BOX_LABEL_HEIGHT = 28
+const DEFAULT_NODE_SIZE = { width: 320, height: 360 }
 
 type GenerationCanvasProps = {
   readOnly?: boolean
@@ -70,6 +73,17 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
+function getHexAlphaColor(color: string | undefined, alphaHex: string): string | undefined {
+  const normalized = color?.trim()
+  if (!normalized) return undefined
+  if (/^#[0-9a-fA-F]{6}$/.test(normalized)) return `${normalized}${alphaHex}`
+  if (/^#[0-9a-fA-F]{3}$/.test(normalized)) {
+    const [, r, g, b] = normalized
+    return `#${r}${r}${g}${g}${b}${b}${alphaHex}`
+  }
+  return undefined
+}
+
 function getWheelZoomFactor(event: React.WheelEvent): number {
   const deltaModeMultiplier = event.deltaMode === 1
     ? WHEEL_LINE_HEIGHT
@@ -94,10 +108,7 @@ function createInitialViewport(): { zoom: number; offset: { x: number; y: number
 }
 
 function getNodeSize(node: GenerationCanvasNode): { width: number; height: number } {
-  return {
-    width: node.size?.width || 300,
-    height: node.size?.height || 220,
-  }
+  return node.size || DEFAULT_NODE_SIZE
 }
 
 function getSelectedBounds(nodes: readonly GenerationCanvasNode[], selectedNodeIds: readonly string[]): {
@@ -118,10 +129,43 @@ function getSelectedBounds(nodes: readonly GenerationCanvasNode[], selectedNodeI
   }
 }
 
+type CanvasGroupBox = {
+  group: NodeGroup
+  left: number
+  top: number
+  width: number
+  height: number
+  memberCount: number
+}
+
+function getCanvasGroupBoxes(groups: readonly NodeGroup[], nodes: readonly GenerationCanvasNode[]): CanvasGroupBox[] {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]))
+  return groups.flatMap((group) => {
+    const members = group.nodeIds.flatMap((nodeId) => {
+      const node = nodeById.get(nodeId)
+      return node && node.categoryId === group.categoryId ? [node] : []
+    })
+    if (!members.length) return []
+    const minX = Math.min(...members.map((node) => node.position.x))
+    const minY = Math.min(...members.map((node) => node.position.y))
+    const maxX = Math.max(...members.map((node) => node.position.x + getNodeSize(node).width))
+    const maxY = Math.max(...members.map((node) => node.position.y + getNodeSize(node).height))
+    return [{
+      group,
+      left: minX - GROUP_BOX_PADDING,
+      top: minY - GROUP_BOX_PADDING - GROUP_BOX_LABEL_HEIGHT,
+      width: maxX - minX + GROUP_BOX_PADDING * 2,
+      height: maxY - minY + GROUP_BOX_PADDING * 2 + GROUP_BOX_LABEL_HEIGHT,
+      memberCount: members.length,
+    }]
+  })
+}
+
 export default function GenerationCanvas({ readOnly = false }: GenerationCanvasProps): JSX.Element {
   const isReady = useGenerationCanvasStore((state) => state.isReady)
   const allNodes = useGenerationCanvasStore((state) => state.nodes)
   const allEdges = useGenerationCanvasStore((state) => state.edges)
+  const allGroups = useGenerationCanvasStore((state) => state.groups)
   const activeCategoryId = useWorkbenchStore((state) => state.activeCategoryId)
   // Phase E3: filter nodes by active sub-canvas. Nodes with no categoryId
   // fall back to the project default ("shots") so legacy projects keep
@@ -134,6 +178,10 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
   const edges = React.useMemo(
     () => allEdges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)),
     [allEdges, visibleNodeIds],
+  )
+  const groups = React.useMemo(
+    () => allGroups.filter((group) => group.categoryId === activeCategoryId),
+    [activeCategoryId, allGroups],
   )
   const selectedNodeIds = useGenerationCanvasStore((state) => state.selectedNodeIds)
   const addNode = useGenerationCanvasStore((state) => state.addNode)
@@ -154,6 +202,7 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
   const selectedSet = React.useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const nodeById = React.useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes])
   const selectedBounds = React.useMemo(() => getSelectedBounds(nodes, selectedNodeIds), [nodes, selectedNodeIds])
+  const groupBoxes = React.useMemo(() => getCanvasGroupBoxes(groups, nodes), [groups, nodes])
   const [settingsOpen, setSettingsOpen] = React.useState(false)
   const [apiKey, setApiKey] = React.useState(() => readProviderSetting('apiKey'))
   const [baseUrl, setBaseUrl] = React.useState(() => readProviderSetting('baseUrl'))
@@ -842,6 +891,30 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
               })()}
             </svg>
             <div className={cn('generation-canvas-v2__nodes', 'absolute top-0 left-0 w-[4000px] h-[3000px]')}>
+              <div className="generation-canvas-v2__group-boxes" aria-hidden="true">
+                {groupBoxes.map((box) => {
+                  const groupColor = box.group.color || undefined
+                  return (
+                    <div
+                      key={box.group.id}
+                      className="generation-canvas-v2__group-box"
+                      style={{
+                        left: box.left,
+                        top: box.top,
+                        width: box.width,
+                        height: box.height,
+                        borderColor: groupColor,
+                        backgroundColor: getHexAlphaColor(groupColor, '18'),
+                      }}
+                    >
+                      <div className="generation-canvas-v2__group-box-label" style={{ backgroundColor: groupColor }}>
+                        <span>{box.group.name}</span>
+                        <span>{box.memberCount}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
               <React.Suspense fallback={null}>
                 {visibleNodesForRender.map((node) => {
                   const NodeComponent = getGenerationNodeComponent(node.kind)

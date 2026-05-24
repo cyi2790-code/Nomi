@@ -39,7 +39,61 @@
 }
 
 .generation-canvas-v2-node {
+  position: relative;
+  z-index: 2;
   pointer-events: auto;
+}
+
+.generation-canvas-v2__group-boxes {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.generation-canvas-v2__group-box {
+  position: absolute;
+  border: 1.5px solid color-mix(in srgb, var(--nomi-accent) 55%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--nomi-accent) 8%, transparent);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.58), 0 14px 34px rgba(18, 24, 38, 0.055);
+}
+
+.generation-canvas-v2__group-box-label {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  min-height: 22px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--nomi-accent);
+  color: var(--nomi-paper);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  box-shadow: 0 8px 18px rgba(18, 24, 38, 0.12);
+}
+
+.generation-canvas-v2__group-box-label span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generation-canvas-v2__group-box-label span:last-child {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+  font-size: 10px;
 }
 
 .generation-canvas-v2__edge-path {
