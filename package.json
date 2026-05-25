@@ -19,7 +19,8 @@
     "test": "vitest run",
     "test:build": "pnpm run build",
     "dist": "electron-builder",
-    "dist:mac:dir": "electron-builder --mac dir --arm64"
+    "dist:mac:dir": "electron-builder --mac dir --arm64",
+    "postinstall": "node ./scripts/install-git-hooks.cjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.2.12",

@@ -30,24 +30,19 @@
 
 ### 进度表强制更新机制（针对上一次 spec 不被尊重的教训）
 
-新增 `scripts/check-progress-update.sh`，pre-commit hook 调用：
+实现：
 
-```bash
-#!/usr/bin/env bash
-# 如果 commit message 含 [E.2C-N] 形式的 task id，
-# 检查同一 commit 是否更新了 §10 进度表对应行为 ✓
-msg=$(cat .git/COMMIT_EDITMSG 2>/dev/null || echo "")
-plan="docs/plans/2026-05-25-phase-e2-completion-and-tech-uplift.md"
-task_id=$(echo "$msg" | grep -oE '\[E\.2C-[0-9A-Z]+\]' | head -1 | tr -d '[]')
-[ -z "$task_id" ] && exit 0
-if ! git diff --cached "$plan" 2>/dev/null | grep -q "${task_id}.*✓"; then
-  echo "ERROR: commit message references $task_id but $plan §10 not updated."
-  echo "Mark $task_id as ✓ in the progress table within this same commit."
-  exit 1
-fi
-```
+- `scripts/check-progress-update.cjs` — Node 检查脚本（跨平台）
+- `scripts/install-git-hooks.cjs` — `pnpm install` 时自动安装 `.git/hooks/commit-msg`
+- `package.json` `postinstall` 触发安装
+- 用 **commit-msg** hook（不是 pre-commit），因为我们要读 commit message
 
-W0 第一个 task 就是装好这个 hook。之后任何"忘记更新进度表"的提交会被本地直接拒绝。
+逻辑：
+1. commit message 不含 `[E.2C-XX]` → 放行
+2. 含 task id 但本次 commit 没改进度文档 → 拒绝
+3. 含 task id 且进度文档新增行包含该 id + ✓ → 放行
+
+W0 第一个 task (E.2C-01) 装好这个 hook。之后任何"忘记更新进度表"的提交会被本地直接拒绝。
 
 ---
 
@@ -866,13 +861,13 @@ export const iconsByName = {
 
 ## 10. 进度跟踪
 
-**总进度**: 0 / 34 tasks (0%)
-**当前 Wave**: ⏸ 待启动 Wave 0
+**总进度**: 1 / 34 tasks (3%)
+**当前 Wave**: 🚧 Wave 0 进行中
 **最后更新**: 2026-05-25
 
 | Wave | Task | 主题 | 状态 | Commit |
 |---|---|---|---|---|
-| W0 | E.2C-01 | 进度 hook 落地 | ⏸ | - |
+| W0 | E.2C-01 | 进度 hook 落地 | ✓ | pending |
 | W0 | E.2C-02 | TypeScript 5.7 | ⏸ | - |
 | W0 | E.2C-03 | Vite 6 | ⏸ | - |
 | W0 | E.2C-04 | Vitest 3 | ⏸ | - |
