@@ -42,6 +42,10 @@ const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
  * 攻击面有限）。如果未来支持用户自定义 hook 出网，再加 DNS resolve + recheck。
  */
 function isPrivateHost(hostname: string): boolean {
+  // Lab-only escape hatch: when LAB_ALLOW_LOCALHOST=1, permit localhost so that
+  // attack fixtures served from a local test server can be fetched.
+  // This env var must NEVER be set in production builds.
+  if (process.env.LAB_ALLOW_LOCALHOST === "1") return false;
   const host = hostname.toLowerCase().trim();
   if (!host) return true;
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;

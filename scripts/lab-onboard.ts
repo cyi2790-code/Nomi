@@ -18,6 +18,7 @@
  * Output goes to docs/onboarding-trials/<timestamp>-<slug>/
  */
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runOnboardingTrial } from "../electron/ai/onboarding/agent";
@@ -29,6 +30,7 @@ const repoRoot = path.resolve(__dirname, "..");
 
 type Args = {
   docs?: string;
+  fixture?: string;
   key?: string;
   kind?: ModelKind;
   agentProvider?: ProviderKind;
@@ -46,6 +48,7 @@ function parseArgs(argv: string[]): Args {
     const next = argv[i + 1];
     switch (arg) {
       case "--docs": out.docs = next; i++; break;
+      case "--fixture": out.fixture = next; i++; break;
       case "--key": out.key = next; i++; break;
       case "--kind": out.kind = next as ModelKind; i++; break;
       case "--agent-provider": out.agentProvider = next as ProviderKind; i++; break;
@@ -68,11 +71,66 @@ function readSecretArg(arg: string | undefined, envName: string): string {
   return process.env[envName] || "";
 }
 
+/**
+ * Spin up a tiny localhost HTTP server serving HTML files from the fixtures dir.
+ * Returns the base URL + a function to shut down the server.
+ * Used by --fixture flag to feed malicious attack samples to the agent
+ * without polluting the production hardenedFetch behavior.
+ */
+function startFixtureServer(fixturesDir: string): Promise<{ port: number; close: () => void }> {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      const safePath = (req.url || "").replace(/\.\./g, "").replace(/^\/+/, "");
+      const filePath = path.join(fixturesDir, safePath);
+      // ensure resolved path is under fixturesDir
+      const resolved = path.resolve(filePath);
+      if (!resolved.startsWith(path.resolve(fixturesDir))) {
+        res.statusCode = 403;
+        res.end("Forbidden");
+        return;
+      }
+      fs.readFile(resolved, (err, data) => {
+        if (err) {
+          res.statusCode = 404;
+          res.end("Not found");
+          return;
+        }
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.end(data);
+      });
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") return reject(new Error("bad address"));
+      resolve({ port: addr.port, close: () => server.close() });
+    });
+    server.on("error", reject);
+  });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  if (!args.docs) {
-    console.error("Missing --docs <url>");
+  // Set up docs URL — either user-provided or from a local fixture file
+  let docsUrl = args.docs;
+  let fixtureServer: { port: number; close: () => void } | null = null;
+  if (args.fixture) {
+    const fixturesDir = path.join(repoRoot, "docs", "onboarding-trials", "fixtures");
+    const fixtureFile = args.fixture.endsWith(".html") ? args.fixture : `${args.fixture}.html`;
+    const fullPath = path.join(fixturesDir, fixtureFile);
+    if (!fs.existsSync(fullPath)) {
+      console.error(`Fixture not found: ${fullPath}`);
+      process.exit(1);
+    }
+    // Enable localhost in hardenedFetch ONLY for this trial
+    process.env.LAB_ALLOW_LOCALHOST = "1";
+    fixtureServer = await startFixtureServer(fixturesDir);
+    docsUrl = `http://127.0.0.1:${fixtureServer.port}/${fixtureFile}`;
+    console.log(`▶  Loaded fixture: ${fixtureFile} (served at ${docsUrl})`);
+  }
+
+  if (!docsUrl) {
+    console.error("Missing --docs <url> or --fixture <name>");
     process.exit(1);
   }
   if (!args.kind) {
@@ -102,13 +160,13 @@ async function main() {
   const reporter = createReporter({
     trialsRoot,
     trialId,
-    docsUrl: args.docs,
+    docsUrl,
     targetKind: args.kind,
   });
 
   console.log("");
   console.log(`▶  Trial: ${trialId}`);
-  console.log(`   Docs:  ${args.docs}`);
+  console.log(`   Docs:  ${docsUrl}`);
   console.log(`   Kind:  ${args.kind}`);
   console.log(`   Agent: ${agentModel} via ${agentBaseUrl}`);
   console.log(`   Out:   ${reporter.trialDir}`);
@@ -132,7 +190,7 @@ async function main() {
   try {
     const outcome = await runOnboardingTrial({
       trialId,
-      docsUrl: args.docs,
+      docsUrl,
       targetKind: args.kind,
       userApiKey,
       agent: {
@@ -156,8 +214,10 @@ async function main() {
     console.log(`   Summary: ${reporter.trialDir}/summary.md`);
     console.log("");
 
+    if (fixtureServer) fixtureServer.close();
     process.exit(outcome.status === "success" ? 0 : 1);
   } catch (e) {
+    if (fixtureServer) fixtureServer.close();
     const msg = e instanceof Error ? e.message : String(e);
     console.error("");
     console.error(`✗  Trial crashed: ${msg}`);
