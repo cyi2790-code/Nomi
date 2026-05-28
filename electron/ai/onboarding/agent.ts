@@ -10,6 +10,7 @@
  */
 import { generateText } from "ai";
 import { buildAiSdkModel } from "../buildAiSdkModel";
+import { sanitizeForBroadCompat } from "../promptSanitize";
 import { buildOnboardingTools } from "./tools";
 import { buildSystemPrompt } from "./systemPrompt";
 import { draftStore } from "./draft";
@@ -84,22 +85,57 @@ export async function runOnboardingTrial(input: OnboardingAgentInput): Promise<T
   let stepCount = 0;
 
   try {
-    // Some reasoning models (o1, o3, kimi-k2.x) only accept temperature: 1.
-    const restrictedTempModels = /^(o1|o3|kimi-k2)/i;
-    const temperature = restrictedTempModels.test(input.agent.modelId) ? 1 : 0.1;
+    // Build prompts then sanitize for broad tokenizer compatibility (em-dashes,
+    // curly quotes, math symbols etc. break older tokenizers like Moonshot's).
+    const systemPrompt = sanitizeForBroadCompat(buildSystemPrompt(input.targetKind, input.docsUrl));
+    const userMessage = sanitizeForBroadCompat(
+      `Please onboard this model. Docs URL: ${input.docsUrl}. Target kind: ${input.targetKind}. Follow the workflow.`,
+    );
 
+    // The model profile (modelProfiles.ts) declaratively handles per-model
+    // quirks: temperature requirements, default max_tokens, extra body fields.
+    // buildAiSdkModel's profiled fetch applies them; the call here passes the
+    // generic temperature/maxTokens and lets the profile override.
     const result = await generateText({
       model,
-      system: buildSystemPrompt(input.targetKind, input.docsUrl),
-      messages: [{
-        role: "user",
-        content: `Please onboard this model. Docs URL: ${input.docsUrl}. Target kind: ${input.targetKind}. Follow the workflow.`,
-      }],
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
       tools,
       maxSteps: input.maxSteps ?? 10,
-      temperature,
-      // Moonshot defaults max_tokens too low (causes truncated tool-call JSON). Force higher.
+      temperature: 0.1,
       maxTokens: 4096,
+      // experimental_repairToolCall: retry on malformed tool-call JSON.
+      // Some models emit invalid JSON for complex schemas; this gives them
+      // a structured retry chance instead of crashing the whole loop.
+      experimental_repairToolCall: async ({ toolCall, error, messages, system: _system }) => {
+        // Ask the same model to fix its own broken JSON arguments.
+        // This is AI SDK's built-in repair hook — works with any model.
+        try {
+          const repaired = await generateText({
+            model,
+            system:
+              "You are a JSON repair assistant. Given a tool call with broken arguments, return ONLY the corrected JSON object that matches the tool's parameter schema.",
+            messages: [
+              ...messages,
+              {
+                role: "user",
+                content:
+                  `The previous tool call to "${toolCall.toolName}" had invalid arguments:\n` +
+                  `\`\`\`json\n${toolCall.args}\n\`\`\`\n` +
+                  `Error: ${error.message}\n` +
+                  `Output only the corrected JSON arguments — no markdown, no explanation.`,
+              },
+            ],
+            temperature: 0.1,
+            maxTokens: 1024,
+          });
+          // Try to parse as JSON; if it works, AI SDK retries the tool with these args.
+          JSON.parse(repaired.text);
+          return { ...toolCall, args: repaired.text };
+        } catch {
+          return null;  // give up, let AI SDK report the original error
+        }
+      },
       onStepFinish: (step) => {
         stepCount += 1;
         input.onEvent?.({

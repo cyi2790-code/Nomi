@@ -1,6 +1,21 @@
+/**
+ * AI SDK model factory.
+ *
+ * Returns a Vercel AI SDK `LanguageModelV1` for either an OpenAI-compatible
+ * endpoint (most providers) or the Anthropic Messages API.
+ *
+ * Provider-specific quirks (Moonshot's `enable_thinking`, reasoning models'
+ * fixed temperature, max_tokens defaults) are NOT hardcoded here — they
+ * live in `modelProfiles.ts` as data. This module just plumbs the profile
+ * through a wrapping fetch.
+ *
+ * Adding a new quirky provider = adding one entry to modelProfiles, not
+ * editing this file.
+ */
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import type { LanguageModelV1 } from "ai";
+import { applyProfileToRequestBody, getModelProfile } from "./modelProfiles";
 
 export type AiSdkProviderKind = "openai-compatible" | "anthropic";
 
@@ -12,43 +27,36 @@ export interface BuildAiSdkModelInput {
 }
 
 /**
- * Build a custom fetch that injects provider-specific tweaks into request bodies.
+ * Wrap the global fetch so each request body gets profile-driven adjustments
+ * (forced temperature, default max_tokens, extra body fields).
  *
- * Currently handles:
- *  - Moonshot Kimi K2.x: must include `enable_thinking: false` to allow
- *    tool calling without reasoning_content (AI SDK doesn't ship reasoning_content).
+ * Optional debug: set LAB_DEBUG_REQUESTS=1 to dump each request body to /tmp.
  */
-function buildPatchedFetch(modelId: string): typeof fetch {
-  const isKimiK2 = /^kimi-k2/i.test(modelId);
-  const isMoonshot = /^(moonshot-|kimi-)/i.test(modelId);
+function buildProfiledFetch(modelId: string): typeof fetch {
+  const profile = getModelProfile(modelId);
   const debug = process.env.LAB_DEBUG_REQUESTS === "1";
 
   return (async (url: any, init?: any) => {
     if (init?.body && typeof init.body === "string") {
       try {
-        const body = JSON.parse(init.body);
-        // Kimi K2 thinking workaround
-        if (isKimiK2) body.enable_thinking = false;
-        if (debug && isMoonshot) {
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        const adjusted = applyProfileToRequestBody(body, profile);
+        if (debug) {
           const fs = await import("node:fs");
-          fs.writeFileSync(`/tmp/lab-request-${Date.now()}.json`, JSON.stringify(body, null, 2));
+          fs.writeFileSync(
+            `/tmp/lab-request-${Date.now()}.json`,
+            JSON.stringify(adjusted, null, 2),
+          );
         }
-        init = { ...init, body: JSON.stringify(body) };
+        init = { ...init, body: JSON.stringify(adjusted) };
       } catch {
-        /* not JSON, leave as-is */
+        /* body is not JSON — pass through unchanged */
       }
     }
     return fetch(url as any, init);
   }) as typeof fetch;
 }
 
-/**
- * Factory that returns a Vercel AI SDK `LanguageModelV1` for either an
- * OpenAI-compatible endpoint (e.g. ChatFire) or the Anthropic Messages API.
- *
- * Keeping the construction in one place lets the rest of the runtime stay
- * agnostic to which provider is in use; all branching happens here.
- */
 export function buildAiSdkModel(input: BuildAiSdkModelInput): LanguageModelV1 {
   const apiKey = (input.apiKey || "").trim();
   if (!apiKey) {
@@ -75,7 +83,10 @@ export function buildAiSdkModel(input: BuildAiSdkModelInput): LanguageModelV1 {
     name: "nomi",
     baseURL,
     apiKey,
-    fetch: buildPatchedFetch(modelId),
+    fetch: buildProfiledFetch(modelId),
   });
   return provider.chatModel(modelId);
 }
+
+// Re-export profile lookup for the onboarding wizard's capability test.
+export { getModelProfile } from "./modelProfiles";
