@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, safeStorage } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -82,6 +82,29 @@ type Model = {
     updatedAt?: string;
     specCosts: Array<{ specKey: string; cost: number; enabled: boolean; createdAt?: string; updatedAt?: string }>;
   };
+  /**
+   * Catalog v2+: present when this model was produced by the onboarding agent.
+   * Carries the doc-quote evidence per parameter so we can audit / re-trial later.
+   */
+  onboarding?: {
+    addedVia: "agent" | "manual";
+    trialId?: string;
+    docsUrl?: string;
+    addedAt: string;
+    fields: Array<{
+      key: string;
+      displayName: string;
+      type: "select" | "number" | "text" | "boolean" | "image-url";
+      options?: Array<{ value: string; label: string }>;
+      default?: string;
+      evidence: {
+        field: string;
+        evidence: string;
+        evidence_location: string;
+        confidence: "high" | "medium" | "low";
+      };
+    }>;
+  };
   createdAt: string;
   updatedAt: string;
 };
@@ -100,14 +123,21 @@ type Mapping = {
 
 type ApiKeyRecord = {
   vendorKey: string;
+  /** Key material. Encoding indicated by `enc`. Legacy v1 records have no `enc` and are plaintext. */
   apiKey: string;
+  /** v2+: how the apiKey above is encoded. Absent = legacy plaintext (v1). */
+  enc?: "safeStorage" | "plain";
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
 };
 
+/** Catalog version. v2 added Model.onboarding + ApiKeyRecord.enc. */
+type CatalogVersion = 1 | 2;
+const CURRENT_CATALOG_VERSION: CatalogVersion = 2;
+
 type CatalogState = {
-  version: 1;
+  version: CatalogVersion;
   vendors: Vendor[];
   models: Model[];
   mappings: Mapping[];
@@ -763,7 +793,7 @@ function catalogPath(): string {
 function defaultCatalog(): CatalogState {
   const t = nowIso();
   return {
-    version: 1,
+    version: CURRENT_CATALOG_VERSION,
     vendors: [
       {
         key: "chatfire",
@@ -818,15 +848,20 @@ function defaultCatalog(): CatalogState {
 
 function readCatalog(): CatalogState {
   const parsed = readJson<CatalogState | null>(catalogPath(), null);
-  if (!parsed || parsed.version !== 1) {
+  if (!parsed) {
     const initial = defaultCatalog();
     writeCatalog(initial);
     return initial;
   }
-  const apiKeysByVendor = parsed.apiKeysByVendor || {};
+
+  // Migrate forward. v1 → v2: tag pre-existing keys as plaintext-encoded; M5.2
+  // will lazy-upgrade them to safeStorage on first read once that lands.
+  const migrated = migrateCatalogForward(parsed);
+
+  const apiKeysByVendor = migrated.apiKeysByVendor || {};
   return {
-    ...parsed,
-    vendors: parsed.vendors.map((vendor) => ({
+    ...migrated,
+    vendors: migrated.vendors.map((vendor) => ({
       ...vendor,
       providerKind: normalizeProviderKind(vendor.providerKind),
       hasApiKey: Boolean(apiKeysByVendor[vendor.key]?.apiKey && apiKeysByVendor[vendor.key]?.enabled !== false),
@@ -835,9 +870,104 @@ function readCatalog(): CatalogState {
   };
 }
 
+/**
+ * In-place forward migration. Unknown future versions fall back to defaults.
+ * Always returns a state at CURRENT_CATALOG_VERSION.
+ */
+function migrateCatalogForward(state: CatalogState): CatalogState {
+  let s = state;
+
+  if (!s.version || (s.version as number) < 1) {
+    // Garbled state — fall back to defaults rather than risk corruption.
+    return defaultCatalog();
+  }
+
+  if (s.version === 1) {
+    // v1 → v2: tag every existing API key as plaintext so M5.2 knows what to upgrade.
+    const apiKeysByVendor: Record<string, ApiKeyRecord> = {};
+    for (const [k, rec] of Object.entries(s.apiKeysByVendor || {})) {
+      apiKeysByVendor[k] = { ...rec, enc: rec.enc || "plain" };
+    }
+    s = { ...s, version: 2, apiKeysByVendor };
+    writeCatalog(s);
+  }
+
+  if ((s.version as number) > CURRENT_CATALOG_VERSION) {
+    // Newer file than this app understands — keep going read-only, but don't downgrade.
+    console.warn(`[catalog] file version ${s.version} > app version ${CURRENT_CATALOG_VERSION}; reading as-is`);
+  }
+
+  // Lazy upgrade: any plaintext keys get re-encrypted on first read once safeStorage is up.
+  // This handles both legacy v1 keys post-migration and import-from-export scenarios.
+  if (isSafeStorageAvailable()) {
+    let dirty = false;
+    const upgraded: Record<string, ApiKeyRecord> = {};
+    for (const [k, rec] of Object.entries(s.apiKeysByVendor || {})) {
+      if (rec.enc !== "safeStorage" && rec.apiKey) {
+        upgraded[k] = makeApiKeyRecordFromPlain(rec.apiKey, rec.vendorKey, rec.enabled, rec.createdAt, rec.updatedAt);
+        dirty = true;
+      } else {
+        upgraded[k] = rec;
+      }
+    }
+    if (dirty) {
+      s = { ...s, apiKeysByVendor: upgraded };
+      writeCatalog(s);
+    }
+  }
+
+  return s;
+}
+
 function writeCatalog(state: CatalogState): CatalogState {
   writeJson(catalogPath(), state);
   return state;
+}
+
+// =================================================================
+// API key encryption (M5.2)
+//
+// safeStorage uses OS keychain (macOS Keychain, Windows DPAPI, libsecret on Linux).
+// When unavailable (e.g. rootless Linux without keyring), we fall back to plaintext
+// and tag the record so a future read can lazy-upgrade.
+// =================================================================
+
+let __safeStorageAvailableCached: boolean | null = null;
+function isSafeStorageAvailable(): boolean {
+  if (__safeStorageAvailableCached !== null) return __safeStorageAvailableCached;
+  try {
+    __safeStorageAvailableCached = safeStorage.isEncryptionAvailable();
+  } catch {
+    __safeStorageAvailableCached = false;
+  }
+  if (!__safeStorageAvailableCached) {
+    console.warn("[catalog] safeStorage unavailable; API keys will be stored as plaintext");
+  }
+  return __safeStorageAvailableCached;
+}
+
+/** Build a fresh ApiKeyRecord from plaintext, encrypting if safeStorage is available. */
+function makeApiKeyRecordFromPlain(plain: string, vendorKey: string, enabled: boolean, createdAt: string, updatedAt: string): ApiKeyRecord {
+  if (isSafeStorageAvailable()) {
+    const encrypted = safeStorage.encryptString(plain).toString("base64");
+    return { vendorKey, apiKey: encrypted, enc: "safeStorage", enabled, createdAt, updatedAt };
+  }
+  return { vendorKey, apiKey: plain, enc: "plain", enabled, createdAt, updatedAt };
+}
+
+/** Decode an ApiKeyRecord to plaintext. Throws if a safeStorage-encoded value can't be decrypted. */
+function decryptApiKeyRecord(rec: ApiKeyRecord | undefined): string {
+  if (!rec || !rec.apiKey) return "";
+  if (rec.enc === "safeStorage") {
+    try {
+      return safeStorage.decryptString(Buffer.from(rec.apiKey, "base64"));
+    } catch (e) {
+      console.error(`[catalog] failed to decrypt API key for vendor ${rec.vendorKey}: ${e instanceof Error ? e.message : e}`);
+      return "";
+    }
+  }
+  // enc === "plain" or absent (legacy v1)
+  return rec.apiKey;
 }
 
 function normalizeEnabled(value: unknown, fallback = true): boolean {
@@ -962,13 +1092,13 @@ export function upsertModelCatalogVendorApiKey(vendorKey: string, payload: unkno
   if (!apiKey) throw new Error("api key is required");
   const t = nowIso();
   const existing = state.apiKeysByVendor[key];
-  state.apiKeysByVendor[key] = {
-    vendorKey: key,
+  state.apiKeysByVendor[key] = makeApiKeyRecordFromPlain(
     apiKey,
-    enabled: normalizeEnabled((payload as JsonRecord)?.enabled, true),
-    createdAt: existing?.createdAt || t,
-    updatedAt: t,
-  };
+    key,
+    normalizeEnabled((payload as JsonRecord)?.enabled, true),
+    existing?.createdAt || t,
+    t,
+  );
   writeCatalog(state);
   return { vendorKey: key, hasApiKey: true, enabled: state.apiKeysByVendor[key].enabled, createdAt: state.apiKeysByVendor[key].createdAt, updatedAt: t };
 }
@@ -1052,8 +1182,9 @@ export function exportModelCatalogPackage(params?: unknown): unknown {
     exportedAt: nowIso(),
     vendors: state.vendors.map((vendor) => ({
       vendor,
+      // Export carries plaintext keys for portability; re-import will re-encrypt on the target machine.
       ...(includeApiKeys && state.apiKeysByVendor[vendor.key]?.apiKey
-        ? { apiKey: { apiKey: state.apiKeysByVendor[vendor.key].apiKey, enabled: state.apiKeysByVendor[vendor.key].enabled } }
+        ? { apiKey: { apiKey: decryptApiKeyRecord(state.apiKeysByVendor[vendor.key]), enabled: state.apiKeysByVendor[vendor.key].enabled } }
         : {}),
       models: state.models.filter((model) => model.vendorKey === vendor.key),
       mappings: state.mappings.filter((mapping) => mapping.vendorKey === vendor.key),
@@ -1456,7 +1587,7 @@ function findExecutableModel(vendorKey: string, modelKey: string, kind?: Billing
   if (!vendor) throw new Error(`Vendor is not enabled: ${vendorKey}`);
   const model = state.models.find((item) => item.vendorKey === vendorKey && item.enabled && (!kind || item.kind === kind) && (item.modelKey === modelKey || item.modelAlias === modelKey));
   if (!model) throw new Error(`Model is not enabled: ${modelKey}`);
-  const apiKey = state.apiKeysByVendor[vendorKey]?.apiKey || "";
+  const apiKey = decryptApiKeyRecord(state.apiKeysByVendor[vendorKey]);
   if (vendor.authType !== "none" && !apiKey) throw new Error(`API key missing: ${vendorKey}`);
   return { vendor, model, apiKey };
 }
@@ -2153,7 +2284,7 @@ function chooseTextModel(): { vendor: Vendor; model: Model; apiKey: string } {
   const state = readCatalog();
   for (const model of state.models.filter((item) => item.kind === "text" && item.enabled)) {
     const vendor = state.vendors.find((item) => item.key === model.vendorKey && item.enabled);
-    const apiKey = state.apiKeysByVendor[model.vendorKey]?.apiKey || "";
+    const apiKey = decryptApiKeyRecord(state.apiKeysByVendor[model.vendorKey]);
     if (vendor && (vendor.authType === "none" || apiKey)) return { vendor, model, apiKey };
   }
   throw new Error("No local text model is configured. Open model settings and add an API key.");
