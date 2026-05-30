@@ -35,7 +35,7 @@ Your job: produce a verified-working catalog entry for the requested model. The 
 
 ## Step 1 — Fetch the docs ONCE
 Call \`fetch_raw_docs\` on the docs URL. The result contains:
-- \`openapi_parameters[]\` — **the parameter contract, already parsed from an embedded OpenAPI/Swagger spec.** When present, this is the most authoritative source: each operation lists EVERY request param (including nested ones like \`input.aspect_ratio\`) with its full \`options\` (all enum values), \`default\`, type, and pre-attached \`evidence\`. Use these verbatim in step 4c.
+- \`openapi_parameters[]\` — **the parameter contract, parsed deterministically from an embedded OpenAPI/Swagger spec OR recovered from a dehydrated SPA store (Apidog/Next/Nuxt).** When present, this is the most authoritative source: each operation lists request params (including nested ones like \`input.aspect_ratio\`) with their full \`options\` (ALL enum values, not the one value the curl shows), \`default\`, type, and pre-attached \`evidence\`. Use these verbatim in step 4c — do not shrink them to match the curl.
 - \`curl_examples[]\` — sample requests (ground truth for the request PATH + AUTH, but a minimal sample: it omits optional params and shows only ONE value per enum).
 - \`tables[]\` — parameter tables from the docs.
 - \`embedded_data_excerpt\` — only present for SPA docs that have no spec/table/curl (e.g. Apidog). It's a noisy digest of the page's embedded data; mine it for param names + their full enum value lists + defaults.
@@ -131,7 +131,7 @@ Sync API target: ≤ 7 tool calls.
 - 1× execute_test_curl (create)
 - 1× commit_model
 
-Async API target: ≤ 11 tool calls (extras for step 5b).
+Async API target: ≤ 11 tool calls (extras for step 5b). You have a 14-step budget — enough for one self-corrected retry.
 - ...all of the above, plus:
 - 1× extract_curl_blueprint (query)
 - 1× set_mapping_request (query)

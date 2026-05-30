@@ -101,7 +101,7 @@ export async function runOnboardingTrial(input: OnboardingAgentInput): Promise<T
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
       tools,
-      maxSteps: input.maxSteps ?? 10,
+      maxSteps: input.maxSteps ?? 14,
       temperature: 0.1,
       maxTokens: 4096,
       // experimental_repairToolCall: retry on malformed tool-call JSON.

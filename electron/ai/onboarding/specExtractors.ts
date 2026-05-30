@@ -11,9 +11,13 @@
  *      → `extractOpenApiOperations` parses it deterministically.
  *   2. a dehydrated SPA store (Apidog / Next / Nuxt) where the same strings are
  *      present but interned + JSON-in-JSON escaped, so `htmlToMarkdown` (which
- *      strips <script>) hides them from the agent
- *      → `extractEmbeddedParameterData` resurfaces them as a focused digest the
- *        onboarding LLM can read.
+ *      strips <script>) hides them from the agent. Two layers:
+ *      → `extractDehydratedParameters` deterministically recovers enum params
+ *        (full option sets + defaults) into the same DocOperation shape as the
+ *        OpenAPI path — the agent uses them verbatim, no mining. PREFERRED.
+ *      → `extractEmbeddedParameterData` is the last-resort digest: when even the
+ *        structured recovery finds nothing, it resurfaces raw fragments for the
+ *        LLM to read. Noisy + token-heavy, so gated to truly empty cases.
  *
  * Keep this module free of Electron globals (shared with the Lab CLI).
  */
@@ -328,7 +332,156 @@ export function extractOpenApiOperations(html: string): DocOperation[] {
 }
 
 // =================================================================
-// 2. Embedded-data digest (dehydrated SPA stores: Apidog / Next / Nuxt)
+// 2. Structured dehydrated-store parameter extraction (Apidog et al.)
+// =================================================================
+//
+// Real case: kie.ai's Apidog doc embeds the contract as an interned/
+// dehydrated object graph (numeric refs + JSON-in-JSON escaping). There is
+// NO parseable `{"openapi":...}` object (so extractOpenApiOperations returns
+// []), yet the enum value lists ARE present as adjacent quoted-token runs:
+//
+//   "aspect_ratio",{refs},"The aspect ratio ... set to auto by default.",
+//      [2050,...,2065],"auto","1:1","3:2",...,"9:21",[2067,...]
+//   "resolution",{refs},[2087,2088,2089],"1K","2K","4K",[2091,...]
+//
+// The page also carries a clean `"method","post","path","/api/v1/.../createTask"`
+// run. We mine these deterministically into the SAME DocOperation shape that
+// the OpenAPI path produces, so the agent consumes them verbatim via
+// fetch_raw_docs.openapi_parameters — no LLM mining of a noisy digest.
+//
+// Precision over recall: a page like this contains ~80 enum-shaped runs that
+// are pure scaffolding (navbar, config, locale lists). We only accept a run
+// whose nearest preceding identifier is a known generation-parameter name.
+
+// Exact-match vocabulary of user-facing generation params. Anchored to avoid
+// matching structural keys (tagName/method/apiDetail/...). Expand as needed.
+const GEN_PARAM_NAME =
+  /^(prompt|negative[_-]?prompt|aspect[_-]?ratio|ratio|resolution|size|image[_-]?size|duration|quality|style|seed|width|height|steps|num[_-]?inference[_-]?steps|guidance|guidance[_-]?scale|cfg|cfg[_-]?scale|format|output[_-]?format|sampler|scheduler|strength|num[_-]?images|n|fps|motion|loop|background|voice|language|model[_-]?version|variant)$/i;
+const BARE_ID = /"([a-zA-Z][a-zA-Z0-9_]{1,40})"/g;
+// A run of >=2 short quoted tokens (the enum values). Same shape as ENUM_RUN
+// below but compiled separately so the two scans don't share lastIndex.
+const ENUM_RUN_STRUCT = /(?:"[^"\n]{1,24}"\s*,\s*){1,}"[^"\n]{1,24}"/g;
+
+/** Pull a human description (a spacey quoted string) near the enum run. */
+function pickDescriptionNear(ctx: string): string {
+  let best = "";
+  const re = /"([^"\\\n]{20,200})"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(ctx)) !== null) {
+    const s = m[1];
+    // descriptions contain spaces; enum tokens / ids / paths don't (much)
+    if (/\s/.test(s) && !s.startsWith("/") && s.length > best.length) best = s;
+  }
+  return best.trim();
+}
+
+/** Recover a default value from a description, validated against the options. */
+function defaultFromDescription(desc: string, opts: string[]): string | undefined {
+  if (!desc) return undefined;
+  const patterns = [
+    /set to "?([\w:.\-]+)"? by default/i,
+    /defaults?\s+(?:to|is|value)?\s*[:=]?\s*"?([\w:.\-]+)"?/i,
+    /"?([\w:.\-]+)"?\s+by default/i,
+  ];
+  for (const p of patterns) {
+    const m = p.exec(desc);
+    if (m && opts.includes(m[1])) return m[1];
+  }
+  return undefined;
+}
+
+/**
+ * Extract a single operation's enum parameters from a dehydrated SPA store.
+ * Returns [] when no generation-param enum runs are present. Method/path are
+ * best-effort (the curl blueprint remains the source of truth for the request);
+ * the value here is the COMPLETE option sets the curl sample lacks.
+ */
+export function extractDehydratedParameters(html: string): DocOperation[] {
+  const scripts: string[] = [];
+  const scriptRe = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let s: RegExpExecArray | null;
+  while ((s = scriptRe.exec(html)) !== null) {
+    if (s[1] && s[1].length > 0) scripts.push(s[1]);
+  }
+  if (scripts.length === 0) return [];
+  const corpus = unescapeJsonInJson(unescapeJsonInJson(scripts.join("\n")));
+
+  // Best-effort method + path from a clean `"method","post","path","/x"` run.
+  let method = "POST";
+  let apiPath = "(see request example)";
+  const mp = /"method"\s*,\s*"(get|post|put|patch|delete)"\s*,\s*"path"\s*,\s*"(\/[^"]+)"/i.exec(corpus);
+  if (mp) {
+    method = mp[1].toUpperCase();
+    apiPath = mp[2];
+  }
+
+  const fields: FieldDefinition[] = [];
+  ENUM_RUN_STRUCT.lastIndex = 0;
+  let e: RegExpExecArray | null;
+  while ((e = ENUM_RUN_STRUCT.exec(corpus)) !== null) {
+    const runStr = e[0];
+    const before = corpus.slice(Math.max(0, e.index - 220), e.index);
+    // Signature of a real Apidog enum: the value run is the dereferenced labels
+    // of a numeric ref array, so it is IMMEDIATELY preceded by `[<digits>,...],`.
+    // CSS/nav/locale runs (false positives) are preceded by `},` or a string.
+    // This is the discriminator that separates the 2 real params from ~80 noise
+    // runs on the page.
+    if (!/\[\s*\d+(?:\s*,\s*\d+)*\s*\]\s*,?\s*$/.test(before)) continue;
+    // nearest preceding bare identifier that is a known generation param
+    const ids: string[] = [];
+    BARE_ID.lastIndex = 0;
+    let idm: RegExpExecArray | null;
+    while ((idm = BARE_ID.exec(before)) !== null) ids.push(idm[1]);
+    let name = "";
+    for (let i = ids.length - 1; i >= 0; i -= 1) {
+      if (GEN_PARAM_NAME.test(ids[i]) && !WIRING_KEY.test(ids[i])) {
+        name = ids[i];
+        break;
+      }
+    }
+    if (!name) continue;
+
+    // parse + dedupe the option values
+    const rawOpts = [...runStr.matchAll(/"([^"\n]{1,24})"/g)].map((x) => x[1]);
+    const optValues: string[] = [];
+    for (const v of rawOpts) if (!optValues.includes(v)) optValues.push(v);
+    if (optValues.length < 2) continue;
+
+    const ctx = corpus.slice(Math.max(0, e.index - 240), e.index + runStr.length + 240);
+    const desc = pickDescriptionNear(ctx);
+    const def = defaultFromDescription(desc, optValues);
+
+    const options: ParameterOption[] = optValues.map((v) => ({ value: v, label: v }));
+    const evidenceText =
+      `Dehydrated API spec · "${name}" enum: ${optValues.join(", ")}` + (desc ? ` — ${desc}` : "");
+    const field: FieldDefinition = {
+      key: name,
+      displayName: humanizeKey(name),
+      type: "select",
+      options,
+      ...(def !== undefined ? { default: def } : {}),
+      evidence: {
+        field: name,
+        evidence: evidenceText.length >= 20 ? evidenceText : `${evidenceText} (embedded spec)`,
+        evidence_location: `Embedded API spec (dehydrated store) · ${method} ${apiPath}`,
+        confidence: "high",
+      },
+    };
+    const existing = fields.findIndex((f) => f.key === field.key);
+    // Keep the richer option set if we see the same param twice.
+    if (existing >= 0) {
+      if ((field.options?.length || 0) > (fields[existing].options?.length || 0)) fields[existing] = field;
+    } else {
+      fields.push(field);
+    }
+  }
+
+  if (fields.length === 0) return [];
+  return [{ method, path: apiPath, fields }];
+}
+
+// =================================================================
+// 3. Embedded-data digest (dehydrated SPA stores: Apidog / Next / Nuxt)
 // =================================================================
 
 export type EmbeddedDigest = { found: boolean; excerpt: string };

@@ -388,7 +388,10 @@ function registerOnboardingIpc(): void {
         targetKind: targetKind ?? ("image" as ModelKind), // fallback until set_model_kind tool lands
         userApiKey,
         agent,
-        maxSteps: Number(payload?.maxSteps) || 10,
+        // Async APIs legitimately need ~11 tool calls (create + query stage),
+        // and a self-corrected 404 can eat one more. 10 was too tight and left
+        // drafts "partial" (test passed, query stage never wired). 14 gives margin.
+        maxSteps: Number(payload?.maxSteps) || 14,
         onEvent: (evt) => sendOnboardingEvent(session, evt),
       })
         .then((outcome) => {

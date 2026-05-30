@@ -58,6 +58,24 @@ curl 示例本质是「最小可跑样例」，不是完整参数契约，因此
 - specExtractors 单测：干净 OpenAPI fixture 还原全部参数 + enum；Apidog 转义 fixture 的摘要里能搜到全部 16 个 aspect ratio 与 1K/2K/4K。
 - 真机：重新 onboard kie GPT Image-2 后，节点上 `aspect_ratio` 下拉框含 16 项、出现 `resolution`（1K/2K/4K），参数数量与文档一致。
 
+## 5b. 真机复盘 + v2 根治（同日，trace 实证）
+
+v1 上线后真机重跑 kie GPT Image-2,仍 `partial`、参数只有 `aspect_ratio` 单选项 `auto`。trace 实证三个根因:
+
+1. **digest gate 写错（致命）**:`needDigest = tables===0 && curls===0 && openapiOps===0`。kie doc **有 1 个 curl**(最小样例),于是 digest 被 gate 掉、根本没触发;干净 OpenAPI 解析对去水化 store 返回 0 → agent 手里只剩那个 curl → 1 参数 1 选项。「curl 存在但不全」恰恰是 Apidog 的常态,旧 gate 把恢复路径关死了。
+2. **digest 即便触发也太吵**:24KB 噪音(clientConfig/navbar/`_4955` 引用),`promptTokens` 飙到 114857,LLM 宁可走 curl 捷径也不挖。
+3. **异步步数不足**:返回 taskId 属异步,需 step 5b 接 query;`toolCalls:10` 撞 maxSteps 顶,加上一次 404 自愈,step 5b 没跑完 → `partial`。
+
+**v2 修复(已实现+测试):**
+
+- 新增 `extractDehydratedParameters(html): DocOperation[]`:确定性解析 Apidog 去水化图。识别签名 = enum 值串**紧前面是纯数字引用数组** `[2050,...,2065],`(枚举标签的 deref 数组),前置标识符落在**生成参数词表**(`GEN_PARAM_NAME`,锚定精确匹配)。真机 81 个 enum-run 噪音中精确捞出 `aspect_ratio`(16 值 default=auto)+`resolution`(1K/2K/4K),0 误报。还从 `"method","post","path","/x"` 干净串恢复方法+路径。
+- `fetch_raw_docs`:`structuredOps = openapiOps.length ? openapiOps : extractDehydratedParameters(text)`,**无条件跑**、喂进同一个 `openapi_parameters` 通道。digest 降级为「结构化也为空」时的最后兜底(消除 token 暴涨)。
+- maxSteps 默认 10→14(main.ts + agent.ts);systemPrompt 预算文案同步。
+- systemPrompt `openapi_parameters` 描述补「或从去水化 SPA store 恢复」。
+- 测试:`extractDehydratedParameters` 5 个新单测(method/path 恢复、两个真参数全选项、噪音 run 拒绝、evidence、空输入)。33 文件 / 292 测试全绿(+5)。
+
+> Rule 1:digest 不是被并行保留,而是明确降级为兜底;结构化解析是新真理源,curl 仅管路径/鉴权。
+
 ## 6. 后续（不在本轮）
 
 - 把 spec-only 参数合并进请求 body 模板（`resolution` 选了能真正发出）。

@@ -17,7 +17,7 @@ import { z } from "zod";
 import { hardenedFetch, hardenedFetchText } from "../../hardenedFetch";
 import { draftStore, looksAsyncResponse } from "./draft";
 import { extractTables, extractCurlExamples, extractCodeBlocks, htmlToMarkdown } from "./docExtractors";
-import { extractOpenApiOperations, extractEmbeddedParameterData } from "./specExtractors";
+import { extractOpenApiOperations, extractDehydratedParameters, extractEmbeddedParameterData } from "./specExtractors";
 import { parseCurlBlueprint } from "./curlBlueprint";
 import type {
   ProviderKind, AuthType,
@@ -115,10 +115,19 @@ export function buildOnboardingTools(hooks: ToolHooks) {
           // embedded OpenAPI spec or a dehydrated SPA store that htmlToMarkdown
           // strips. openapi_parameters is deterministic; the digest is the
           // fallback for stores we can't parse (Apidog/Next/Nuxt).
+          // Deterministic contract first (clean embedded OpenAPI/Swagger). When
+          // that finds nothing (e.g. Apidog dehydrated stores have NO parseable
+          // spec), fall back to the structured dehydrated-store parser, which
+          // recovers enum params + full option sets from the interned graph.
+          // Both feed the same openapi_parameters channel the agent uses
+          // verbatim — so the curl's incomplete sample never defines the fields.
+          // This runs UNCONDITIONALLY (the old gate let a present-but-minimal
+          // curl suppress recovery, which is exactly the Apidog failure case).
           const openapiOps = extractOpenApiOperations(fetched.text);
-          // Only spend tokens on the raw embedded digest when we have nothing
-          // else structured to go on (no tables, no curl, no parseable spec).
-          const needDigest = tables.length === 0 && curls.length === 0 && openapiOps.length === 0;
+          const structuredOps = openapiOps.length > 0 ? openapiOps : extractDehydratedParameters(fetched.text);
+          // The raw digest is a last resort only — when nothing structured (no
+          // table, no curl, no spec, no dehydrated enums) gave the agent params.
+          const needDigest = tables.length === 0 && curls.length === 0 && structuredOps.length === 0;
           const embedded = needDigest ? extractEmbeddedParameterData(fetched.text) : { found: false, excerpt: "" };
 
           // record into draft for replay
@@ -137,7 +146,7 @@ export function buildOnboardingTools(hooks: ToolHooks) {
             code_blocks: codeBlocks.slice(0, 10),
             // Deterministic, ready-to-apply parameter contract per operation
             // (fields already carry options/default/evidence). Prefer these.
-            openapi_parameters: openapiOps.slice(0, 10),
+            openapi_parameters: structuredOps.slice(0, 10),
             // Fallback raw digest for SPA stores with no spec/table/curl.
             ...(embedded.found ? { embedded_data_excerpt: embedded.excerpt } : {}),
             markdown_excerpt: markdown.slice(0, 30_000),  // first 30k chars
