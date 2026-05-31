@@ -134,8 +134,22 @@ v1 上线后真机重跑 kie GPT Image-2,仍 `partial`、参数只有 `aspect_ra
 
 > 方法论沉淀：`probe-extract-matrix.ts` 是这个反复出问题领域的离线回归台——以后加平台/改 parser，先对它跑一遍，不用每次真机烧钱跑 agent。
 
+## 5f. R2 落地：跟随链接二次抓取懒加载 spec（同日）
+
+懒加载 SPA（fal.ai 的 Next/RSC、部分 Redoc/Swagger 页）不把 spec 嵌进服务端 HTML，而是客户端再去抓一个 `*openapi*.json` / `swagger.json` URL。内联抽取必然为空，唯一出路是**二次抓取那个 spec URL**。
+
+- `extractSpecLinks(html, pageUrl)`（`specExtractors.ts`）：扫描 HTML 里的候选 spec URL（相对 + 绝对，必须含 `openapi`/`swagger`/`api-docs` 且形如文档 URL），对 `pageUrl` 解析成绝对地址，去重 + 截顶。精度优先：不抓任意 `.json` 资产（避免在 i18n/config blob 上浪费请求）。
+- `fetch_raw_docs`（`tools.ts`）：当内联 `extractOpenApiOperations` / `extractDehydratedParameters` 都为空时，逐个 `hardenedFetch` 这些 spec URL，对返回 JSON 跑 `extractOpenApiOperations`，命中即喂进**同一个 `openapi_parameters` 通道**。best-effort，单个失败试下一个。
+- 测试：`specExtractors.test.ts` +6（fal 相对 URL 解析、绝对 swagger、根相对、去重截顶、忽略通用 `.json`/散文提及、空页）。`probe-extract-matrix.ts` 增加 R2 跟随分支。
+
+**结论（诚实版，真机扫描复核）：**
+- **fal.ai flux-pro**：内联 0 → R2 跟随 `https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=fal-ai/flux-pro` → 解析出 10 个参数（含 `output_format[2]`、`safety_tolerance[6]`、`image_size`）。✅ 本轮新覆盖。
+- **kie Hailuo（Apidog）**：页面唯一对外 spec 链接是品牌静态资产（`assets.apidog.com/.../brand/openapi`，无 ops）；真 spec 端点是私有/鉴权的 detail XHR，公网拿不到。R2 无害穿过（无 ops → 落到既有 curl 路径，与之前一致）。**Apidog 这类没有公开 spec URL 的，R2 也覆盖不了——需要鉴权，不在能力范围内，如实告知。**
+
+9 文档扫描：8/9 命中结构化路径（OpenAPI/去水化/R2），Hailuo 走 curl。
+
 ## 6. 后续（不在本轮）
 
 - ~~把 spec-only 参数合并进请求 body 模板~~（已在 5d 完成）。
-- **R2（已升为最高优先，是当前唯一已知 gap）**：Hailuo/fal.ai 这类懒加载 SPA，spec 不在初始 HTML。需跟随页面里的 spec 端点（Apidog 的 detail XHR / fal 的 RSC chunk / 外部 `openapi.json`）二次抓取。
-- R3 探针：对仍为空的 enum 发非法值，从 4xx 错误回显补全。
+- ~~R2 跟随链接二次抓取懒加载 spec~~（已在 5f 完成；fal.ai 覆盖，Apidog 私有端点除外）。
+- R3 探针：对仍为空的 enum 发非法值，从 4xx 错误回显补全（Apidog 这类拿不到 spec 的最后兜底）。

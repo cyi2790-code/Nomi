@@ -353,6 +353,74 @@ export function extractOpenApiOperations(html: string): DocOperation[] {
 }
 
 // =================================================================
+// 1b. Lazy-loaded spec discovery (follow-link secondary fetch)
+// =================================================================
+//
+// Some doc pages don't embed the OpenAPI spec in the served HTML — they fetch
+// it client-side (fal.ai's Next/RSC shell loads `/api/openapi/queue/openapi.json
+// ?endpoint_id=<model>`; various Redoc/Swagger pages reference an external
+// `*-openapi.json` / `swagger.json`). For those, inline extraction returns []
+// and the only way to get the contract is a SECOND fetch of the spec URL.
+//
+// extractSpecLinks finds those candidate URLs in the HTML (relative + absolute)
+// and resolves them against the page URL. The caller (fetch_raw_docs) fetches
+// each and runs extractOpenApiOperations on the JSON. Precision matters: we only
+// accept URLs that look like a machine-readable spec (openapi/swagger + .json),
+// never arbitrary .json assets (which would waste fetches on i18n/config blobs).
+
+// A URL path that names an OpenAPI/Swagger JSON document. Matches:
+//   /api/openapi/queue/openapi.json   (fal.ai)
+//   /static/openapi.json, /v1/swagger.json, /openapi/v3/api-docs (springdoc)
+//   …-openapi.json, swagger-spec.json
+const SPEC_URL_RE =
+  /(?:https?:\/\/[^\s"'<>()\\]+|\/[^\s"'<>()\\]*)?(?:openapi|swagger|api-docs)[^\s"'<>()\\]*?(?:\.json|\b)(?:\?[^\s"'<>()\\]*)?/gi;
+
+/**
+ * Discover candidate external OpenAPI/Swagger spec URLs referenced by the page
+ * but NOT embedded in it. Returns absolute URLs (resolved against pageUrl),
+ * deduped, capped. Empty when the page references no spec document.
+ */
+export function extractSpecLinks(html: string, pageUrl: string, max = 5): string[] {
+  let base: URL | null = null;
+  try {
+    base = new URL(pageUrl);
+  } catch {
+    base = null;
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const consider = (raw: string) => {
+    let cleaned = raw.trim().replace(/\\\//g, "/").replace(/&amp;/g, "&");
+    // strip leading garbage so a match like `:"/api/openapi.json"` resolves
+    cleaned = cleaned.replace(/^[^/h]*?(?=https?:\/\/|\/)/i, "");
+    if (!cleaned) return;
+    // must reference a spec document — guard against generic .json assets that
+    // merely contain the word in a hash/path segment we don't want.
+    if (!/(?:openapi|swagger|api-docs)/i.test(cleaned)) return;
+    let resolved: string;
+    try {
+      resolved = base ? new URL(cleaned, base).toString() : new URL(cleaned).toString();
+    } catch {
+      return;
+    }
+    if (!/^https?:\/\//i.test(resolved)) return;
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    out.push(resolved);
+  };
+
+  let m: RegExpExecArray | null;
+  SPEC_URL_RE.lastIndex = 0;
+  while ((m = SPEC_URL_RE.exec(html)) !== null && out.length < max * 4) {
+    // require a path-ish or url-ish match (skip bare "openapi" words in prose)
+    const hit = m[0];
+    if (!/[/.]/.test(hit)) continue;
+    consider(hit);
+  }
+  return out.slice(0, max);
+}
+
+// =================================================================
 // 2. Structured dehydrated-store parameter extraction (Apidog et al.)
 // =================================================================
 //

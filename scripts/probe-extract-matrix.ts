@@ -6,7 +6,7 @@
  *
  * Proves: does the param-extraction layer generalize across platforms?
  */
-import { extractOpenApiOperations, extractDehydratedParameters, extractEmbeddedParameterData } from "../electron/ai/onboarding/specExtractors";
+import { extractOpenApiOperations, extractDehydratedParameters, extractEmbeddedParameterData, extractSpecLinks } from "../electron/ai/onboarding/specExtractors";
 import { extractTables, extractCurlExamples } from "../electron/ai/onboarding/docExtractors";
 
 const DOCS: Array<{ label: string; url: string }> = [
@@ -66,7 +66,27 @@ async function main() {
     console.log(`  tables: ${tables.length} | curls: ${curls.length}`);
     console.log(`  [1] OpenAPI ops:      ${summarizeFields(openapi as any)}`);
     console.log(`  [2] dehydrated ops:   ${summarizeFields(dehydrated as any)}`);
-    const chosen = openapi.length ? "OpenAPI" : dehydrated.length ? "dehydrated" : tables.length ? "tables" : curls.length ? "curl" : digest.found ? "digest" : "NONE";
+
+    // R2: when nothing is embedded, follow candidate spec links (fal.ai etc.).
+    let followed: Awaited<ReturnType<typeof extractOpenApiOperations>> = [];
+    if (!openapi.length && !dehydrated.length) {
+      const links = extractSpecLinks(html, doc.url);
+      if (links.length) console.log(`  [R2] spec links:      ${links.join(" , ")}`);
+      for (const link of links) {
+        try {
+          const specOps = extractOpenApiOperations(await fetchHtml(link));
+          if (specOps.length) {
+            followed = specOps;
+            console.log(`  [R2] followed ops:    ${summarizeFields(specOps as any)}`);
+            break;
+          }
+        } catch {
+          /* unreachable / not JSON — try next */
+        }
+      }
+    }
+
+    const chosen = openapi.length ? "OpenAPI" : dehydrated.length ? "dehydrated" : followed.length ? "followed-spec(R2)" : tables.length ? "tables" : curls.length ? "curl" : digest.found ? "digest" : "NONE";
     console.log(`  → agent path: ${chosen}${chosen === "NONE" ? "  ⚠️" : ""}`);
     if (chosen === "digest") console.log(`     digest excerpt len: ${digest.excerpt.length}`);
   }

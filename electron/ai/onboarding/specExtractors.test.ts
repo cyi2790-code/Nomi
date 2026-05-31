@@ -6,7 +6,7 @@
  * nothing; these two extractors are the root fix.
  */
 import { describe, it, expect } from "vitest";
-import { extractOpenApiOperations, extractDehydratedParameters, extractEmbeddedParameterData } from "./specExtractors";
+import { extractOpenApiOperations, extractDehydratedParameters, extractEmbeddedParameterData, extractSpecLinks } from "./specExtractors";
 
 describe("extractOpenApiOperations — deterministic OpenAPI parse", () => {
   // Mirrors kie's shape: top-level model/callBackUrl/input, input is a $ref'd
@@ -151,6 +151,42 @@ describe("extractOpenApiOperations — deterministic OpenAPI parse", () => {
     const ops = extractOpenApiOperations(html);
     expect(ops.length).toBe(1);
     expect(ops[0].fields.map((f) => f.key)).toContain("aspect_ratio"); // kept the richer
+  });
+});
+
+describe("extractSpecLinks — lazy-loaded spec discovery (R2)", () => {
+  it("finds the fal.ai relative openapi.json URL and resolves it absolute", () => {
+    // fal.ai's Next/RSC shell references the spec, doesn't embed it.
+    const html = `<script>self.__next_f.push([1,"...\\"specUrl\\":\\"/api/openapi/queue/openapi.json?endpoint_id=fal-ai/flux-pro\\"..."])</script>`;
+    const links = extractSpecLinks(html, "https://fal.ai/models/fal-ai/flux-pro");
+    expect(links).toContain("https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=fal-ai/flux-pro");
+  });
+
+  it("finds an absolute swagger.json URL", () => {
+    const html = `<link rel="alternate" href="https://api.example.com/v1/swagger.json">`;
+    const links = extractSpecLinks(html, "https://docs.example.com/page");
+    expect(links).toContain("https://api.example.com/v1/swagger.json");
+  });
+
+  it("resolves a root-relative openapi spec against the page origin", () => {
+    const html = `<redoc spec-url="/static/openapi.json"></redoc>`;
+    const links = extractSpecLinks(html, "https://docs.example.com/reference/intro");
+    expect(links).toContain("https://docs.example.com/static/openapi.json");
+  });
+
+  it("dedupes repeated references and caps the result", () => {
+    const html = `"/openapi.json" "/openapi.json" "/openapi.json"`;
+    const links = extractSpecLinks(html, "https://x.com/a");
+    expect(links).toEqual(["https://x.com/openapi.json"]);
+  });
+
+  it("ignores generic .json assets and bare prose mentions", () => {
+    const html = `<p>Our OpenAPI support is great.</p><script src="/config/locale.json"></script>`;
+    expect(extractSpecLinks(html, "https://x.com/a")).toEqual([]);
+  });
+
+  it("returns [] when the page already embeds nothing spec-like", () => {
+    expect(extractSpecLinks("<html><body>no spec</body></html>", "https://x.com/a")).toEqual([]);
   });
 });
 

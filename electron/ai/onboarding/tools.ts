@@ -17,7 +17,7 @@ import { z } from "zod";
 import { hardenedFetch, hardenedFetchText } from "../../hardenedFetch";
 import { draftStore, looksAsyncResponse } from "./draft";
 import { extractTables, extractCurlExamples, extractCodeBlocks, htmlToMarkdown } from "./docExtractors";
-import { extractOpenApiOperations, extractDehydratedParameters, extractEmbeddedParameterData } from "./specExtractors";
+import { extractOpenApiOperations, extractDehydratedParameters, extractEmbeddedParameterData, extractSpecLinks } from "./specExtractors";
 import { parseCurlBlueprint } from "./curlBlueprint";
 import type {
   ProviderKind, AuthType,
@@ -124,7 +124,27 @@ export function buildOnboardingTools(hooks: ToolHooks) {
           // This runs UNCONDITIONALLY (the old gate let a present-but-minimal
           // curl suppress recovery, which is exactly the Apidog failure case).
           const openapiOps = extractOpenApiOperations(fetched.text);
-          const structuredOps = openapiOps.length > 0 ? openapiOps : extractDehydratedParameters(fetched.text);
+          let structuredOps = openapiOps.length > 0 ? openapiOps : extractDehydratedParameters(fetched.text);
+          // R2: follow-link secondary fetch. Some pages (fal.ai Next/RSC shell,
+          // external Redoc/Swagger) DON'T embed the spec — they reference a
+          // `*openapi*.json` / `swagger.json` URL the browser fetches client-side.
+          // When inline extraction found nothing, fetch those spec URLs and parse
+          // them, feeding the SAME openapi_parameters channel. Capped + best-effort.
+          if (structuredOps.length === 0) {
+            const specLinks = extractSpecLinks(fetched.text, fetched.finalUrl);
+            for (const specUrl of specLinks) {
+              try {
+                const specRes = await hardenedFetchText(specUrl, { timeoutMs: 15_000, maxBytes: 5 * 1024 * 1024 });
+                const specOps = extractOpenApiOperations(specRes.text);
+                if (specOps.length > 0) {
+                  structuredOps = specOps;
+                  break;
+                }
+              } catch {
+                // spec URL unreachable / not JSON — try the next candidate
+              }
+            }
+          }
           // The raw digest is a last resort only — when nothing structured (no
           // table, no curl, no spec, no dehydrated enums) gave the agent params.
           const needDigest = tables.length === 0 && curls.length === 0 && structuredOps.length === 0;
