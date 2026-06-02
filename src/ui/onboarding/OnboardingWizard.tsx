@@ -14,11 +14,12 @@
  * Auto-commits to catalog on success (the IPC handler does it).
  */
 import React from 'react'
-import { Stack, Group, Text, PasswordInput, ActionIcon, Anchor, SegmentedControl, TagsInput, Chip } from '@mantine/core'
-import { IconPlus, IconTrash } from '@tabler/icons-react'
-import { DesignButton, DesignModal, DesignTextInput } from '../../design'
+import { Stack, Group, Text, PasswordInput, ActionIcon, Anchor, TagsInput } from '@mantine/core'
+import { IconPlus, IconTrash, IconCheck, IconX } from '@tabler/icons-react'
+import { DesignButton, DesignModal, DesignTextInput, DesignSegmentedControl } from '../../design'
 import { getDesktopBridge } from '../../desktop/bridge'
 import { PROVIDER_PRESETS } from './providerPresets'
+import { cn } from '../../utils/cn'
 
 type Phase = 'input' | 'running' | 'success' | 'error'
 
@@ -69,6 +70,9 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
   // Selected provider preset ('' = none yet). Drives auto-fill + whether to show
   // the 接口类型 toggle (only for custom/none — named presets imply their type).
   const [presetId, setPresetId] = React.useState('')
+  // When a named preset auto-fills BaseURL, we hide that field (correct value,
+  // jargon-y for non-coders). This flag reveals it for the rare custom-gateway case.
+  const [editBaseUrl, setEditBaseUrl] = React.useState(false)
   // Endpoint shape: 'openai-compatible' (default; OpenAI/Kimi/智谱/DeepSeek/中转站)
   // or 'anthropic' (Claude's native /v1/messages — x-api-key, different body).
   const [providerKind, setProviderKind] = React.useState<'openai-compatible' | 'anthropic'>('openai-compatible')
@@ -151,6 +155,7 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
     setProviderKind(preset.providerKind)
     setBaseUrl(preset.baseUrl)
     setVendorName(preset.custom ? '' : preset.label)
+    setEditBaseUrl(false)
     // Endpoint changed → previously fetched models / test result no longer apply.
     setFetchedModels([])
     setFetchModelsMsg('')
@@ -335,6 +340,11 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
   const canTest = baseUrlValid && (providerKind === 'anthropic' || baseUrlTrimmed.length > 0)
   const hasModelId = models.some(m => m.trim().length > 0)
   const canSaveManual = baseUrlValid && userApiKey.trim().length > 0 && hasModelId && !saving
+  const selectedPreset = PROVIDER_PRESETS.find(p => p.id === presetId)
+  const isNamedPreset = Boolean(selectedPreset && !selectedPreset.custom)
+  // Named preset already filled a correct BaseURL → hide the jargon-y field unless
+  // the user explicitly wants to point at a custom gateway.
+  const showBaseUrlField = !isNamedPreset || editBaseUrl
 
   return (
     <DesignModal
@@ -347,24 +357,34 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
       closeOnEscape={phase !== 'running'}
     >
       <Stack gap="md">
-        <Group justify="flex-end">
-          <ProgressDots phase={phase} />
-        </Group>
-
         {phase === 'input' && inputMode === 'manual' && (
-          <Stack gap="md">
+          <Stack gap={12}>
             <Field label="供应商" hint="选一个自动填地址；中转站选「自定义」粘贴地址">
-              <Chip.Group value={presetId} onChange={value => handlePickPreset(value as string)}>
-                <Group gap={6}>
-                  {PROVIDER_PRESETS.map(p => (
-                    <Chip key={p.id} value={p.id} size="xs" radius="sm">{p.label}</Chip>
-                  ))}
-                </Group>
-              </Chip.Group>
+              <div className="flex flex-wrap gap-1.5">
+                {PROVIDER_PRESETS.map(p => {
+                  const active = presetId === p.id
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => handlePickPreset(p.id)}
+                      className={cn(
+                        'px-3 py-1 rounded-full text-[13px] border',
+                        'transition-[background,color,border-color] duration-150',
+                        active
+                          ? 'bg-nomi-accent-soft text-nomi-accent border-nomi-accent'
+                          : 'bg-nomi-paper text-nomi-ink-80 border-nomi-line hover:bg-nomi-ink-05',
+                      )}
+                    >
+                      {p.label}
+                    </button>
+                  )
+                })}
+              </div>
             </Field>
             {(presetId === '' || presetId === 'custom') && (
               <Field label="接口类型" hint={providerKind === 'anthropic' ? 'Claude 原生接口' : '绝大多数模型都选这个'}>
-                <SegmentedControl
+                <DesignSegmentedControl
                   fullWidth
                   value={providerKind}
                   onChange={value => { setProviderKind(value as 'openai-compatible' | 'anthropic'); setTestState('idle') }}
@@ -375,24 +395,38 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
                 />
               </Field>
             )}
-            <Field
-              label="接入地址（BaseURL）"
-              hint={providerKind === 'anthropic' ? '留空用官方地址；中转站填它给你的地址' : '到 /v1 为止'}
-            >
-              <DesignTextInput
-                value={baseUrl}
-                onChange={e => { setBaseUrl(e.currentTarget.value); setTestState('idle') }}
-                placeholder={providerKind === 'anthropic' ? 'https://api.anthropic.com（可留空）' : 'https://api.openai.com/v1'}
-                error={baseUrlTrimmed.length > 0 && !baseUrlValid ? '需以 http:// 或 https:// 开头' : undefined}
-                autoFocus
-              />
-            </Field>
+            {showBaseUrlField ? (
+              <Field
+                label="接入地址（BaseURL）"
+                hint={providerKind === 'anthropic' ? '留空用官方地址；中转站填它给你的地址' : '到 /v1 为止'}
+              >
+                <DesignTextInput
+                  value={baseUrl}
+                  onChange={e => { setBaseUrl(e.currentTarget.value); setTestState('idle') }}
+                  placeholder={providerKind === 'anthropic' ? 'https://api.anthropic.com（可留空）' : 'https://api.openai.com/v1'}
+                  error={baseUrlTrimmed.length > 0 && !baseUrlValid ? '需以 http:// 或 https:// 开头' : undefined}
+                />
+              </Field>
+            ) : (
+              <Text size="xs" c="var(--nomi-ink-60)">
+                接入地址已自动填好 ·{' '}
+                <Anchor component="button" type="button" onClick={() => setEditBaseUrl(true)} c="var(--nomi-accent)" inherit>
+                  自定义
+                </Anchor>
+              </Text>
+            )}
             <Field label="你的 API Key" hint="只存在你的电脑上，加密保存">
               <PasswordInput
                 value={userApiKey}
                 onChange={e => { setUserApiKey(e.currentTarget.value); setTestState('idle') }}
                 placeholder="sk-..."
+                autoFocus
               />
+              {selectedPreset?.keyUrl && (
+                <Anchor href={selectedPreset.keyUrl} target="_blank" rel="noreferrer" c="var(--nomi-accent)" size="xs">
+                  没有 Key？去 {selectedPreset.label} 官网获取 →
+                </Anchor>
+              )}
             </Field>
 
             <Stack gap={4}>
@@ -413,7 +447,6 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
                 data={fetchedModels}
                 placeholder={models.length === 0 ? '输入模型 id 回车，或先拉取可用模型' : undefined}
                 splitChars={[',', ' ', '\n']}
-                clearable
               />
               {fetchModelsMsg && <Text size="xs" c="var(--nomi-ink-60)">{fetchModelsMsg}</Text>}
             </Stack>
@@ -473,10 +506,20 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
                 >
                   测试连接
                 </DesignButton>
-                {testState === 'ok' && <Text size="xs" c="var(--nomi-ink-60)">✓ {testMessage}</Text>}
-                {testState === 'fail' && <Text size="xs" c="var(--nomi-ink-60)" lineClamp={1}>✗ {testMessage}</Text>}
+                {testState === 'ok' && (
+                  <Group gap={4} align="center" wrap="nowrap" c="var(--workbench-success)">
+                    <IconCheck size={14} stroke={1.5} />
+                    <Text size="xs" c="var(--workbench-success)">{testMessage}</Text>
+                  </Group>
+                )}
+                {testState === 'fail' && (
+                  <Group gap={4} align="center" wrap="nowrap" c="var(--workbench-danger)">
+                    <IconX size={14} stroke={1.5} />
+                    <Text size="xs" c="var(--workbench-danger)" lineClamp={1}>{testMessage}</Text>
+                  </Group>
+                )}
               </Group>
-              <DesignButton onClick={handleManualSave} disabled={!canSaveManual} loading={saving}>
+              <DesignButton variant="filled" onClick={handleManualSave} disabled={!canSaveManual} loading={saving}>
                 保存
               </DesignButton>
             </Group>
@@ -552,13 +595,17 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
         )}
 
         {phase === 'success' && (
-          <Stack gap="sm" align="flex-start">
-            <Text size="xl" c="var(--nomi-ink)">✓</Text>
-            <Text size="md" c="var(--nomi-ink)">{resultLabel} 已添加</Text>
-            <Text size="sm" c="var(--nomi-ink-60)">现在可以在节点里选择这个模型</Text>
-            <Group justify="space-between" w="100%">
-              <DesignButton variant="subtle" onClick={() => { resetToInput(); }}>再添加一个</DesignButton>
-              <DesignButton onClick={onClose}>完成</DesignButton>
+          <Stack gap={12} align="center" py={8}>
+            <div className="flex items-center justify-center size-12 rounded-full bg-workbench-success-soft text-workbench-success">
+              <IconCheck size={26} stroke={1.8} />
+            </div>
+            <Stack gap={2} align="center">
+              <Text size="md" fw={600} c="var(--nomi-ink)">{resultLabel} 已添加</Text>
+              <Text size="sm" c="var(--nomi-ink-60)">现在可以在节点里选择这个模型</Text>
+            </Stack>
+            <Group justify="center" gap={8} w="100%" mt={4}>
+              <DesignButton variant="subtle" onClick={() => { resetToInput() }}>再添加一个</DesignButton>
+              <DesignButton variant="filled" onClick={onClose}>完成</DesignButton>
             </Group>
           </Stack>
         )}
@@ -582,23 +629,6 @@ export function OnboardingWizard({ opened, onClose, onCommitted }: {
   )
 }
 
-function ProgressDots({ phase }: { phase: Phase }): JSX.Element {
-  const stepIdx = phase === 'input' ? 0 : phase === 'running' ? 1 : 2
-  return (
-    <Group gap={6}>
-      {[0, 1, 2].map(i => (
-        <span
-          key={i}
-          style={{
-            width: 6, height: 6, borderRadius: '50%',
-            background: i <= stepIdx ? 'var(--nomi-ink)' : 'var(--nomi-ink-20)',
-          }}
-        />
-      ))}
-    </Group>
-  )
-}
-
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }): JSX.Element {
   return (
     <Stack gap={4}>
@@ -610,14 +640,21 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 }
 
 function MilestoneRow({ milestone, detail }: { milestone: Milestone; detail?: string }): JSX.Element {
-  const icon = milestone.status === 'done' ? '✓'
-    : milestone.status === 'failed' ? '✗'
-    : milestone.status === 'active' ? '◐'
-    : '·'
   const color = milestone.status === 'pending' ? 'var(--nomi-ink-40)' : 'var(--nomi-ink-80)'
   return (
-    <Group gap={8} wrap="nowrap">
-      <Text size="sm" style={{ width: 14 }} c={color}>{icon}</Text>
+    <Group gap={8} wrap="nowrap" align="center">
+      <span className="inline-flex items-center justify-center" style={{ width: 14 }}>
+        {milestone.status === 'done' ? (
+          <IconCheck size={14} stroke={1.8} color="var(--workbench-success)" />
+        ) : milestone.status === 'failed' ? (
+          <IconX size={14} stroke={1.8} color="var(--workbench-danger)" />
+        ) : (
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: milestone.status === 'active' ? 'var(--nomi-accent)' : 'var(--nomi-ink-20)',
+          }} />
+        )}
+      </span>
       <Text size="sm" c={color}>{detail || milestone.label}</Text>
     </Group>
   )
