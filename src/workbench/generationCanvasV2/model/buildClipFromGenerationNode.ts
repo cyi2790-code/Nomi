@@ -1,4 +1,4 @@
-import type { TimelineClip, TimelineTrackType } from '../../timeline/timelineTypes'
+import type { TimelineClip, TimelineClipType } from '../../timeline/timelineTypes'
 import type { GenerationCanvasNode, GenerationNodeResult } from './generationCanvasTypes'
 import { getGenerationNodeExecutionKind } from './generationNodeKinds'
 
@@ -31,7 +31,9 @@ function resolveSelectedResult(node: GenerationCanvasNode, resultId?: string): G
   return (node.history || []).find((result) => result.id === selectedResultId) || null
 }
 
-function resolveClipType(node: GenerationCanvasNode, result: GenerationNodeResult | null): TimelineTrackType {
+function resolveClipType(node: GenerationCanvasNode, result: GenerationNodeResult | null): TimelineClipType {
+  // v0.7.1: audio category 优先级最高（即使 kind 占位是 image）
+  if (node.categoryId === 'audio') return 'audio'
   if (result?.type === 'image' || result?.type === 'video') return result.type
   const executionKind = getGenerationNodeExecutionKind(node.kind)
   if (executionKind === 'image') return 'image'
@@ -39,13 +41,14 @@ function resolveClipType(node: GenerationCanvasNode, result: GenerationNodeResul
   return 'image'
 }
 
-function resolveFrameCount(type: TimelineTrackType, result: GenerationNodeResult | null, fps: number): number {
+function resolveFrameCount(type: TimelineClipType, result: GenerationNodeResult | null, fps: number): number {
   if (type === 'image') return DEFAULT_IMAGE_SECONDS * fps
+  // v0.7.1: audio 默认 5 秒（与 video 一致），未来读 meta.durationSec
   const seconds = readPositiveNumber(result?.durationSeconds) || DEFAULT_VIDEO_SECONDS
   return Math.max(1, Math.round(seconds * fps))
 }
 
-function buildClipId(nodeId: string, type: TimelineTrackType, startFrame: number, result: GenerationNodeResult | null): string {
+function buildClipId(nodeId: string, type: TimelineClipType, startFrame: number, result: GenerationNodeResult | null): string {
   const resultPart = result?.id ? `-${result.id}` : ''
   return `clip-${nodeId}${resultPart}-${type}-${startFrame}`
 }
@@ -69,7 +72,8 @@ export function buildClipFromGenerationNode(node: GenerationCanvasNode, options?
   const url = readString(result?.url)
   const thumbnailUrl = readString(result?.thumbnailUrl) || (type === 'image' ? url : '')
 
-  if ((type === 'image' || type === 'video') && !url) return null
+  // v0.7.1: image / video / audio 都要求有 url（生成或上传后才允许拖）
+  if (!url) return null
 
   const frameCount = resolveFrameCount(type, result, fps)
 

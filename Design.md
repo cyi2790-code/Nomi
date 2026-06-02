@@ -1,5 +1,8 @@
 # Nomi Design System
 
+> **完整版设计系统在 [`docs/design/nomi-design-system.md`](docs/design/nomi-design-system.md)。**
+> 本文档只保留高层原则与 token 速查；做任何新设计前请先读完整版。
+
 Nomi is a dense, local-first AI video production workspace. The UI should help creators move through:
 
 ```txt

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, net, protocol } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell, webContents as electronWebContents } from "electron";
+import type { WebContents } from "electron";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -22,15 +23,29 @@ import {
   readProject,
   resolveProjectRelativePath,
   runAgentChat,
+  runAgentChatV2,
   runTask,
   saveProject,
+  showExportInFolder,
+  cancelExportJob,
+  getExportJobStatus,
+  startExportJob,
+  writeExportTempInput,
+  finishExportTempInput,
+  subscribeExportJobEvents,
   testModelCatalogMapping,
   upsertModelCatalogMapping,
   upsertModelCatalogModel,
   upsertModelCatalogVendor,
   upsertModelCatalogVendorApiKey,
   clearModelCatalogVendorApiKey,
+  commitOnboardedModelToCatalog,
+  resolveOnboardingAgentFromCatalog,
 } from "./runtime";
+import { runOnboardingTrial } from "./ai/onboarding/agent";
+import type { ProviderKind, ModelKind } from "./ai/onboarding/types";
+import { openWorkspaceFolder, selectWorkspaceFolder } from "./workspace/workspaceIpc";
+import { listWorkspaceFiles, resolveWorkspaceFilePath } from "./workspace/workspaceFileIndex";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -49,6 +64,7 @@ const isDev = Boolean(process.env.VITE_DEV_SERVER_URL || process.env.NOMI_DESKTO
 const devRemoteDebuggingPort = process.env.NOMI_DESKTOP_REMOTE_DEBUGGING_PORT;
 const DEV_RENDERER_LOAD_ATTEMPTS = 20;
 const DEV_RENDERER_LOAD_RETRY_MS = 500;
+const exportJobEventSubscriptions = new Map<number, () => void>();
 
 if (isDev && devRemoteDebuggingPort) {
   app.commandLine.appendSwitch("remote-debugging-port", devRemoteDebuggingPort);
@@ -119,6 +135,7 @@ async function createWindow(): Promise<void> {
     minHeight: 720,
     backgroundColor: "#f6f3ee",
     title: "Nomi",
+    icon: path.join(__dirname, "../build/icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -153,8 +170,14 @@ function registerSyncIpc<TArgs extends unknown[], TResult>(
 }
 
 function registerIpc(): void {
+  const selectedWorkspaceRoots = new Set<string>();
   registerSyncIpc("nomi:projects:list", listProjects);
-  registerSyncIpc("nomi:projects:create", createProject);
+  registerSyncIpc("nomi:projects:create", (record: unknown) => {
+    if (record && typeof record === "object" && typeof (record as { rootPath?: unknown }).rootPath === "string") {
+      throw new Error("Use nomi:workspace:open-folder to create or open folder-backed projects");
+    }
+    return createProject(record);
+  });
   registerSyncIpc("nomi:projects:read", readProject);
   registerSyncIpc("nomi:projects:save", saveProject);
   registerSyncIpc("nomi:projects:delete", deleteProject);
@@ -174,13 +197,297 @@ function registerIpc(): void {
   registerSyncIpc("nomi:model-catalog:import", importModelCatalogPackage);
 
   ipcMain.handle("nomi:model-catalog:docs:fetch", (_event, payload) => fetchModelCatalogDocs(payload));
+  ipcMain.handle("nomi:workspace:select-folder", async () => {
+    const selection = await selectWorkspaceFolder({ showOpenDialog: (options) => dialog.showOpenDialog(options) });
+    if (!selection.canceled) selectedWorkspaceRoots.add(selection.rootPath);
+    return selection;
+  });
+  ipcMain.handle("nomi:workspace:open-folder", (_event, payload) => openWorkspaceFolder(payload, {
+    createProject,
+    selectedRootPaths: selectedWorkspaceRoots,
+    confirmInitialize: async (rootPath) => {
+      const result = await dialog.showMessageBox({
+        type: "question",
+        buttons: ["取消", "初始化"],
+        defaultId: 1,
+        cancelId: 0,
+        message: "初始化 Nomi 项目文件夹？",
+        detail: `Nomi 会在此文件夹创建 .nomi/，并把生成的图片、视频保存到 assets/ 和 exports/.\n\n${rootPath}`,
+      });
+      return result.response === 1;
+    },
+  }));
+  ipcMain.handle("nomi:workspace:list-files", (_event, payload) => {
+    const projectId = String((payload as { projectId?: unknown } | null)?.projectId || "").trim();
+    if (!projectId) throw new Error("projectId is required");
+    const project = readProject(projectId) as { lastKnownRootPath?: unknown } | null;
+    const rootPath = typeof project?.lastKnownRootPath === "string" ? project.lastKnownRootPath : "";
+    if (!rootPath) throw new Error("Project folder is unavailable");
+    return listWorkspaceFiles({
+      rootPath,
+      maxFiles: typeof (payload as { limit?: unknown } | null)?.limit === "number" ? (payload as { limit: number }).limit : undefined,
+    });
+  });
+  ipcMain.handle("nomi:workspace:reveal-file", (_event, payload) => {
+    const projectId = String((payload as { projectId?: unknown } | null)?.projectId || "").trim();
+    const relativePath = String((payload as { relativePath?: unknown } | null)?.relativePath || "").trim();
+    if (!projectId) throw new Error("projectId is required");
+    const project = readProject(projectId) as { lastKnownRootPath?: unknown } | null;
+    const rootPath = typeof project?.lastKnownRootPath === "string" ? path.resolve(project.lastKnownRootPath) : "";
+    if (!rootPath) throw new Error("Project folder is unavailable");
+    const absolutePath = resolveWorkspaceFilePath(rootPath, relativePath);
+    shell.showItemInFolder(absolutePath);
+    return { ok: true };
+  });
   ipcMain.handle("nomi:model-catalog:mapping:test", (_event, id, payload) => testModelCatalogMapping(id, payload));
   ipcMain.handle("nomi:assets:import-remote-url", (_event, payload) => importRemoteAsset(payload));
   ipcMain.handle("nomi:assets:import-file", (_event, payload) => importLocalFile(payload));
   ipcMain.handle("nomi:assets:list", (_event, payload) => listProjectAssets(payload));
+  ipcMain.handle("nomi:exports:start-job", (event, payload) => {
+    registerExportJobEventForwarding(event.sender);
+    return startExportJob(payload);
+  });
+  ipcMain.handle("nomi:exports:write-temp-input", (event, payload) => {
+    registerExportJobEventForwarding(event.sender);
+    return writeExportTempInput(payload);
+  });
+  ipcMain.handle("nomi:exports:finish-temp-input", (event, payload) => {
+    registerExportJobEventForwarding(event.sender);
+    return finishExportTempInput(payload);
+  });
+  ipcMain.handle("nomi:exports:status", (event, jobId) => {
+    registerExportJobEventForwarding(event.sender);
+    return getExportJobStatus(jobId);
+  });
+  ipcMain.handle("nomi:exports:cancel", (event, jobId) => {
+    registerExportJobEventForwarding(event.sender);
+    return cancelExportJob(jobId);
+  });
+  ipcMain.handle("nomi:exports:show-in-folder", (_event, payload) => showExportInFolder(payload));
   ipcMain.handle("nomi:tasks:run", (_event, payload) => runTask(payload));
   ipcMain.handle("nomi:tasks:result", (_event, payload) => fetchTaskResult(payload));
   ipcMain.handle("nomi:agents:chat", (_event, payload) => runAgentChat(payload));
+  registerAgentChatV2Ipc();
+  registerOnboardingIpc();
+}
+
+function registerExportJobEventForwarding(contents: WebContents): void {
+  if (exportJobEventSubscriptions.has(contents.id)) return;
+  const unsubscribe = subscribeExportJobEvents((payload) => {
+    const target = electronWebContents.fromId(contents.id);
+    if (!target || target.isDestroyed()) return;
+    target.send("nomi:exports:event", payload);
+  });
+  exportJobEventSubscriptions.set(contents.id, unsubscribe);
+  contents.once("destroyed", () => {
+    exportJobEventSubscriptions.get(contents.id)?.();
+    exportJobEventSubscriptions.delete(contents.id);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Agent chat V2 — real streaming + tool-call confirmation
+// ---------------------------------------------------------------------------
+
+type AgentChatV2Session = {
+  sessionId: string;
+  webContentsId: number;
+  pendingConfirmations: Map<string, {
+    resolve: (decision: { ok: true; result: unknown } | { ok: false; message: string }) => void;
+  }>;
+  cancelled: boolean;
+};
+
+const agentChatV2Sessions = new Map<string, AgentChatV2Session>();
+
+function sendChatV2Event(session: AgentChatV2Session, event: unknown): void {
+  const target: WebContents | undefined = electronWebContents.fromId(session.webContentsId) || undefined;
+  if (!target || target.isDestroyed()) return;
+  target.send("nomi:agents:chatV2:event", { sessionId: session.sessionId, event });
+}
+
+function registerAgentChatV2Ipc(): void {
+  ipcMain.handle("nomi:agents:chatV2:start", async (event, payload: Record<string, unknown>) => {
+    const sessionId = `chatV2-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const session: AgentChatV2Session = {
+      sessionId,
+      webContentsId: event.sender.id,
+      pendingConfirmations: new Map(),
+      cancelled: false,
+    };
+    agentChatV2Sessions.set(sessionId, session);
+
+    // Run the agent loop asynchronously so the IPC call can return the
+    // sessionId immediately; the renderer subscribes to events first.
+    queueMicrotask(() => {
+      void runAgentChatV2(payload as Parameters<typeof runAgentChatV2>[0], {
+        emit: (evt) => sendChatV2Event(session, evt),
+        awaitToolConfirmation: ({ toolCallId, toolName, args }) => new Promise((resolve) => {
+          if (session.cancelled) {
+            resolve({ ok: false, message: "session cancelled" });
+            return;
+          }
+          session.pendingConfirmations.set(toolCallId, { resolve });
+          sendChatV2Event(session, {
+            type: "tool-call-pending",
+            toolCallId,
+            toolName,
+            args,
+          });
+        }),
+      })
+        .then((result) => {
+          sendChatV2Event(session, { type: "result", result });
+          sendChatV2Event(session, { type: "done", reason: "finished" });
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          sendChatV2Event(session, { type: "error", message });
+          sendChatV2Event(session, { type: "done", reason: "error" });
+        })
+        .finally(() => {
+          agentChatV2Sessions.delete(sessionId);
+        });
+    });
+
+    return { sessionId };
+  });
+
+  ipcMain.handle("nomi:agents:chatV2:confirmTool", async (_event, payload: {
+    sessionId: string;
+    toolCallId: string;
+    decision: { ok: true; result?: unknown } | { ok: false; message?: string };
+  }) => {
+    const session = agentChatV2Sessions.get(payload.sessionId);
+    if (!session) return { ok: false, error: "session not found" };
+    const pending = session.pendingConfirmations.get(payload.toolCallId);
+    if (!pending) return { ok: false, error: "tool call not pending" };
+    session.pendingConfirmations.delete(payload.toolCallId);
+    if (payload.decision && payload.decision.ok === true) {
+      pending.resolve({ ok: true, result: payload.decision.result ?? null });
+    } else {
+      const message = (payload.decision && (payload.decision as { message?: string }).message) || "rejected by user";
+      pending.resolve({ ok: false, message });
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle("nomi:agents:chatV2:cancel", async (_event, payload: { sessionId: string }) => {
+    const session = agentChatV2Sessions.get(payload.sessionId);
+    if (!session) return { ok: false, error: "session not found" };
+    session.cancelled = true;
+    // Resolve all pending confirmations as rejected so the agent loop exits.
+    for (const [toolCallId, pending] of session.pendingConfirmations) {
+      pending.resolve({ ok: false, message: "session cancelled" });
+      session.pendingConfirmations.delete(toolCallId);
+    }
+    return { ok: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding (M5.4) — IPC bridge for the Wizard UI
+// ---------------------------------------------------------------------------
+
+type OnboardingSession = {
+  trialId: string;
+  webContentsId: number;
+  cancelled: boolean;
+};
+
+const onboardingSessions = new Map<string, OnboardingSession>();
+
+function sendOnboardingEvent(session: OnboardingSession, event: unknown): void {
+  const target: WebContents | undefined = electronWebContents.fromId(session.webContentsId) || undefined;
+  if (!target || target.isDestroyed()) return;
+  target.send("nomi:onboarding:event", { trialId: session.trialId, event });
+}
+
+function registerOnboardingIpc(): void {
+  ipcMain.handle("nomi:onboarding:start", async (event, payload: Record<string, unknown>) => {
+    const docsUrl = String(payload?.docsUrl || "").trim();
+    const userApiKey = String(payload?.userApiKey || "").trim();
+    if (!docsUrl) throw new Error("docsUrl required");
+    if (!userApiKey) throw new Error("userApiKey required");
+
+    // The onboarding doc-reader LLM is resolved in this priority order:
+    //   1. payload.agent — explicit override (the Lab CLI passes --agent-* here).
+    //   2. a configured TEXT model in the catalog — the product path. This is the
+    //      model the user already added in 模型设置 (e.g. dm-fox GPT-5.5); it works
+    //      identically in dev and a packaged app, no env / no .secrets needed.
+    //   3. NOMI_ONBOARDING_AGENT_* env vars — dev/headless fallback only.
+    const agentConfig = (payload?.agent || {}) as Record<string, unknown>;
+    const fromCatalog = resolveOnboardingAgentFromCatalog();
+    const agent = {
+      providerKind: String(
+        agentConfig.providerKind || fromCatalog?.providerKind || process.env.NOMI_ONBOARDING_AGENT_PROVIDER || "openai-compatible",
+      ) as ProviderKind,
+      baseUrl: String(agentConfig.baseUrl || fromCatalog?.baseUrl || process.env.NOMI_ONBOARDING_AGENT_BASE_URL || ""),
+      modelId: String(agentConfig.modelId || fromCatalog?.modelId || process.env.NOMI_ONBOARDING_AGENT_MODEL || ""),
+      apiKey: String(agentConfig.apiKey || fromCatalog?.apiKey || process.env.NOMI_ONBOARDING_AGENT_KEY || ""),
+    };
+    if (!agent.baseUrl || !agent.modelId || !agent.apiKey) {
+      throw new Error(
+        "Onboarding agent not configured. Add a text model (e.g. GPT/Kimi) in 模型设置 first — it will be used to read the docs.",
+      );
+    }
+
+    // Optional target kind hint; if absent, the agent infers from the docs.
+    const targetKind = (payload?.targetKind as ModelKind) || undefined;
+
+    const trialId = `onboard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const session: OnboardingSession = { trialId, webContentsId: event.sender.id, cancelled: false };
+    onboardingSessions.set(trialId, session);
+
+    queueMicrotask(() => {
+      void runOnboardingTrial({
+        trialId,
+        docsUrl,
+        targetKind: targetKind ?? ("image" as ModelKind), // initial seed; the agent overrides it via set_model_kind after reading the docs
+        userApiKey,
+        agent,
+        // Async APIs legitimately need ~11 tool calls (create + query stage),
+        // and a self-corrected 404 can eat one more. 10 was too tight and left
+        // drafts "partial" (test passed, query stage never wired). 14 gives margin.
+        maxSteps: Number(payload?.maxSteps) || 14,
+        onEvent: (evt) => sendOnboardingEvent(session, evt),
+      })
+        .then((outcome) => {
+          // Auto-commit on success so the wizard's "success" event already shows the persisted model.
+          let committedModel: unknown = null;
+          if (outcome.status === "success") {
+            try {
+              committedModel = commitOnboardedModelToCatalog({ outcome, userApiKey });
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              sendOnboardingEvent(session, { type: "commit-error", message });
+            }
+          }
+          sendOnboardingEvent(session, { type: "result", outcome, committedModel });
+          sendOnboardingEvent(session, { type: "done", reason: "finished" });
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          sendOnboardingEvent(session, { type: "error", message });
+          sendOnboardingEvent(session, { type: "done", reason: "error" });
+        })
+        .finally(() => {
+          onboardingSessions.delete(trialId);
+        });
+    });
+
+    return { trialId };
+  });
+
+  ipcMain.handle("nomi:onboarding:cancel", async (_event, payload: { trialId: string }) => {
+    const session = onboardingSessions.get(payload.trialId);
+    if (!session) return { ok: false, error: "session not found" };
+    // True cancellation requires plumbing AbortSignal through generateText.
+    // For now flag the session; the next "done" emit will see cancelled=true.
+    session.cancelled = true;
+    sendOnboardingEvent(session, { type: "cancelled" });
+    return { ok: true };
+  });
 }
 
 function registerLocalProtocol(): void {

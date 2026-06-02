@@ -18,6 +18,9 @@ import type {
 import type { WorkbenchDocument } from "../workbenchTypes";
 import { assertWorkbenchProjectMediaUrlsPersistable } from "./projectMediaMigration";
 import { getDesktopBridge } from "../../desktop/bridge";
+import { normalizeCategories } from "./projectCategories";
+import { buildTemplateCategories, getProjectTemplate } from "../library/projectTemplates";
+import { createDefaultWorkbenchDocument } from "../workbenchTypes";
 
 function extractCanvasThumbnailUrls(
     nodes: GenerationCanvasNode[],
@@ -73,18 +76,31 @@ function readJson(key: string): unknown {
     }
 }
 
+// v0.7.6: 之前 localStorage 配额耗尽时静默丢失 — 创作工具的高风险体验问题
+// 现在驱逐 backup 重试失败后抛错，让调用方决定如何提示用户（通常会冒泡到 onSaveError → toast）
+export class ProjectStorageQuotaError extends Error {
+  readonly key: string;
+  constructor(key: string, cause?: unknown) {
+    super(`Local storage quota exceeded while saving "${key}"`);
+    this.name = "ProjectStorageQuotaError";
+    this.key = key;
+    if (cause instanceof Error) this.stack = cause.stack;
+  }
+}
+
 function writeJson(key: string, value: unknown): void {
     if (typeof window === "undefined") return;
     const serialized = JSON.stringify(value);
     try {
         window.localStorage.setItem(key, serialized);
-    } catch {
+    } catch (firstError) {
         // quota exceeded — evict oldest backups and retry once
         evictOldBackups();
         try {
             window.localStorage.setItem(key, serialized);
-        } catch {
-            /* give up silently */
+        } catch (retryError) {
+            // 不再静默 — 上抛，让 persistence 层 onSaveError 走 toast 通知用户
+            throw new ProjectStorageQuotaError(key, retryError);
         }
     }
 }
@@ -260,7 +276,32 @@ function normalizePayload(input: unknown): WorkbenchProjectPayload {
         ),
         timeline: normalizeTimeline(payload.timeline),
         generationCanvas: payload.generationCanvas,
+        categories: normalizeCategories(payload.categories),
     };
+}
+
+/**
+ * True when the raw record carries any persisted creation content. A workspace
+ * that was initialized by "打开文件夹" on an existing folder (but never saved)
+ * has a minimal manifest payload (just `{ rootPath }`) and none of these fields.
+ */
+function recordHasPersistedContent(raw: unknown): boolean {
+    if (!raw || typeof raw !== "object") return false;
+    const rec = raw as Record<string, unknown>;
+    const containers: Array<Record<string, unknown> | undefined> = [
+        rec,
+        rec.payload && typeof rec.payload === "object"
+            ? (rec.payload as Record<string, unknown>)
+            : undefined,
+    ];
+    return containers.some((container) =>
+        Boolean(
+            container &&
+                (container.workbenchDocument ||
+                    container.timeline ||
+                    container.generationCanvas),
+        ),
+    );
 }
 
 function normalizeRecord(
@@ -272,6 +313,17 @@ function normalizeRecord(
         return {
             ...legacyParsed.data,
             payload: normalizePayload(legacyParsed.data.payload),
+        };
+    }
+    // Freshly-initialized workspace (existing folder opened via "打开文件夹",
+    // never saved): its manifest payload is minimal (just rootPath). Open it as
+    // an empty project with default payload instead of throwing 记录损坏 and
+    // failing to open silently.
+    if (!recordHasPersistedContent(raw)) {
+        return {
+            ...summary,
+            version: 1,
+            payload: createDefaultWorkbenchProjectPayload(),
         };
     }
     const legacy = normalizeLegacyRecord(raw);
@@ -361,8 +413,41 @@ export function listLocalProjects(): WorkbenchProjectSummary[] {
     });
 }
 
-export function createLocalProject(name?: string): WorkbenchProjectRecordV1 {
+function seedDocFromMarkdown(markdown: string): unknown {
+    const lines = markdown.split(/\r?\n/);
+    const blocks: Array<Record<string, unknown>> = [];
+    for (const line of lines) {
+        const trimmed = line.replace(/\s+$/, "");
+        if (!trimmed) continue;
+        if (trimmed.startsWith("# ")) {
+            blocks.push({
+                type: "heading",
+                attrs: { level: 1 },
+                content: [{ type: "text", text: trimmed.slice(2) }],
+            });
+        } else if (trimmed.startsWith("## ")) {
+            blocks.push({
+                type: "heading",
+                attrs: { level: 2 },
+                content: [{ type: "text", text: trimmed.slice(3) }],
+            });
+        } else {
+            blocks.push({
+                type: "paragraph",
+                content: [{ type: "text", text: trimmed }],
+            });
+        }
+    }
+    return { type: "doc", content: blocks };
+}
+
+export function createLocalProject(
+    name?: string,
+    templateId?: string,
+    options: { rootPath?: string } = {},
+): WorkbenchProjectRecordV1 {
     const now = Date.now();
+    const template = getProjectTemplate(templateId || null);
     const summary: WorkbenchProjectSummary = {
         id: createProjectId(),
         name:
@@ -374,7 +459,18 @@ export function createLocalProject(name?: string): WorkbenchProjectRecordV1 {
         revision: 0,
         savedAt: now,
     };
-    const record = createProjectRecord(summary);
+    const docDefaults = createDefaultWorkbenchDocument();
+    const seededDocument = template.seedDocument
+        ? {
+              ...docDefaults,
+              contentJson: seedDocFromMarkdown(template.seedDocument),
+              updatedAt: now,
+          }
+        : docDefaults;
+    const record = createProjectRecord(summary, {
+        workbenchDocument: seededDocument,
+        categories: buildTemplateCategories(template),
+    });
     const desktop = getDesktopBridge();
     if (desktop) {
         return desktop.projects.create(record) as WorkbenchProjectRecordV1;

@@ -139,6 +139,7 @@ function WorkbenchEditorToolbar({ editor }: { editor: Editor | null }): JSX.Elem
           icon={action.icon}
         />
       ))}
+      <div className="flex-1" aria-hidden="true" />
     </div>
   )
 }
@@ -174,7 +175,7 @@ export default function WorkbenchEditor(): JSX.Element {
     extensions: [
       StarterKit,
       Placeholder.configure({
-        placeholder: '',
+        placeholder: '从这里开始写你的故事或剧本...\n\n💡 选中文字后，点右侧「生成图片」或「生成视频」，画布会自动创建对应节点。',
       }),
     ],
     content: editorContent,

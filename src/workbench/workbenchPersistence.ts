@@ -35,7 +35,11 @@ export function normalizeGenerationCanvasSnapshot(input: unknown): GenerationCan
       nodes: [],
       edges: [],
       selectedNodeIds: [],
+      groups: [],
     }
   }
-  return input
+  return {
+    ...input,
+    groups: Array.isArray(input.groups) ? input.groups : [],
+  }
 }

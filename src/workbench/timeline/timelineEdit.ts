@@ -1,4 +1,5 @@
 import type { TimelineClip, TimelineState, TimelineTrack, TimelineTrackType } from './timelineTypes'
+import { getTrackTypeForClipType } from './timelineTypes'
 
 export const TIMELINE_MIN_SCALE = 0.35
 export const TIMELINE_MAX_SCALE = 4
@@ -65,7 +66,8 @@ export function canPlaceClip(track: TimelineTrack, clip: TimelineClip): boolean 
 
 export function addClipAtFrame(timeline: TimelineState, clip: TimelineClip, trackType: TimelineTrackType, startFrame: number): TimelineState {
   const placed = withClipStartFrame(clip, startFrame)
-  if (placed.type !== trackType) return timeline
+  // v0.7.1: clip.type 是 'image' | 'video' | 'audio'，audio/video 都映射到 video 轨
+  if (getTrackTypeForClipType(placed.type) !== trackType) return timeline
   let inserted = false
   const tracks = timeline.tracks.map((track) => {
     if (track.type !== trackType) return track
@@ -125,7 +127,7 @@ export function splitClipAtFrame(timeline: TimelineState, clipId: string, frame:
     const rightVisibleFrames = current.endFrame - splitFrame
     const rightId = buildUniqueClipId(track, `${current.id}-split`)
 
-    const leftClip: TimelineClip = current.type === 'video'
+    const leftClip: TimelineClip = (current.type === 'video' || current.type === 'audio')
       ? {
           ...current,
           endFrame: splitFrame,
@@ -137,7 +139,7 @@ export function splitClipAtFrame(timeline: TimelineState, clipId: string, frame:
           frameCount: leftVisibleFrames,
         }
 
-    const rightClip: TimelineClip = current.type === 'video'
+    const rightClip: TimelineClip = (current.type === 'video' || current.type === 'audio')
       ? {
           ...current,
           id: rightId,
@@ -231,13 +233,13 @@ export function resizeClipEdge(timeline: TimelineState, clipId: string, edge: 'l
       next = {
         ...current,
         startFrame: nextStart,
-        frameCount: current.type === 'video' ? current.frameCount : current.endFrame - nextStart,
-        offsetStartFrame: current.type === 'video' ? Math.max(0, current.offsetStartFrame + diff) : current.offsetStartFrame,
+        frameCount: (current.type === 'video' || current.type === 'audio') ? current.frameCount : current.endFrame - nextStart,
+        offsetStartFrame: (current.type === 'video' || current.type === 'audio') ? Math.max(0, current.offsetStartFrame + diff) : current.offsetStartFrame,
       }
     } else {
       const rawEnd = current.endFrame + delta
       const minEnd = current.startFrame + minFrameCount
-      const naturalMaxEnd = current.type === 'video'
+      const naturalMaxEnd = (current.type === 'video' || current.type === 'audio')
         ? current.startFrame + current.frameCount - current.offsetStartFrame
         : maxEnd
       const nextEnd = Math.max(minEnd, Math.min(maxEnd, naturalMaxEnd, rawEnd))
@@ -245,8 +247,8 @@ export function resizeClipEdge(timeline: TimelineState, clipId: string, edge: 'l
       next = {
         ...current,
         endFrame: nextEnd,
-        frameCount: current.type === 'video' ? current.frameCount : nextEnd - current.startFrame,
-        offsetEndFrame: current.type === 'video' ? Math.max(0, current.offsetEndFrame - diff) : current.offsetEndFrame,
+        frameCount: (current.type === 'video' || current.type === 'audio') ? current.frameCount : nextEnd - current.startFrame,
+        offsetEndFrame: (current.type === 'video' || current.type === 'audio') ? Math.max(0, current.offsetEndFrame - diff) : current.offsetEndFrame,
       }
     }
 

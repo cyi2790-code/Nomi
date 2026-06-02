@@ -1,6 +1,7 @@
 import { buildClipFromGenerationNode } from '../model/buildClipFromGenerationNode'
 import type { GenerationCanvasNode } from '../model/generationCanvasTypes'
 import type { TimelineClip, TimelineState, TimelineTrackType } from '../../timeline/timelineTypes'
+import { getTrackTypeForClipType } from '../../timeline/timelineTypes'
 
 export type SendGenerationNodeToTimelineOptions = {
   fps?: number
@@ -64,14 +65,17 @@ export function sendGenerationNodeToTimeline(
     resultId: options?.resultId,
   })
   if (!clip) return { ok: false, error: 'clip_unavailable', nodeId: id }
-  if (options?.trackType && options.trackType !== clip.type) {
+  // v0.7.1: clip.type 是 'image' | 'video' | 'audio'，trackType 是 'image' | 'video'
+  // audio clip 落到 video 轨道
+  const trackType = getTrackTypeForClipType(clip.type)
+  if (options?.trackType && options.trackType !== trackType) {
     return { ok: false, error: 'track_type_mismatch', nodeId: id, clip }
   }
 
-  ports.addTimelineClipAtFrame(clip, clip.type, startFrame)
+  ports.addTimelineClipAtFrame(clip, trackType, startFrame)
   const inserted = ports.readTimelineAfterInsert().tracks
-    .some((track) => track.type === clip.type && track.clips.some((candidate) => candidate.id === clip.id))
+    .some((track) => track.type === trackType && track.clips.some((candidate) => candidate.id === clip.id))
   if (!inserted) return { ok: false, error: 'timeline_insert_failed', nodeId: id, clip }
 
-  return { ok: true, nodeId: id, clip, trackType: clip.type, startFrame }
+  return { ok: true, nodeId: id, clip, trackType, startFrame }
 }

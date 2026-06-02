@@ -25,7 +25,8 @@ function normalizeClip(input: unknown, fallbackType: TimelineTrackType): Timelin
   const sourceNodeId = normalizeString(raw.sourceNodeId)
   if (!id || !sourceNodeId) return null
 
-  const type = raw.type === 'image' || raw.type === 'video'
+  // v0.7.1: 接受 audio clip type
+  const type = raw.type === 'image' || raw.type === 'video' || raw.type === 'audio'
     ? raw.type
     : fallbackType
   const startFrame = toFiniteNonNegativeInteger(raw.startFrame, 0)

@@ -74,6 +74,26 @@ function inferImageUrlGroup(key: string): ImageUrlGroup {
   return 'reference'
 }
 
+// A param is an image-reference input if onboarding tagged it 'image-url',
+// OR its key name clearly names an image URL (onboarding sometimes mis-tags
+// these as plain text). Both buildImageUrlSlots (top reference boxes) and
+// buildDynamicControls (bottom param row) use THIS predicate, so any given
+// param lands in exactly one place — and it works for any model, not just the
+// ones whose type was tagged correctly during onboarding.
+const IMAGE_URL_KEY_FRAGMENTS = [
+  'imageurl', 'imgurl', 'imageurls', 'inputurl', 'inputurls', 'inputimage', 'inputimg', 'imageinput',
+  'referenceimage', 'refimage', 'initimage', 'sourceimage', 'sourceimg',
+  'startimage', 'endimage', 'firstframe', 'lastframe', 'frameurl', 'photourl',
+]
+function looksLikeImageUrlControl(control: ModelParameterControl): boolean {
+  if (control.type === 'image-url') return true
+  // Only ever promote a free-text param; never a select/number/boolean (those
+  // are real value pickers, not image inputs).
+  if (control.type !== 'text') return false
+  const lower = control.key.toLowerCase().replace(/[-_]/g, '')
+  return IMAGE_URL_KEY_FRAGMENTS.some((f) => lower.includes(f))
+}
+
 function edgeModeForGroup(group: ImageUrlGroup): GenerationCanvasEdgeMode {
   if (group === 'first_frame') return 'first_frame'
   if (group === 'last_frame') return 'last_frame'
@@ -92,7 +112,7 @@ function getEdgeSourceForSlot(
 function buildImageUrlSlots(meta: unknown): ImageUrlSlot[] {
   const controls = parseModelParameterControls(meta)
   return controls
-    .filter((c) => c.type === 'image-url')
+    .filter(looksLikeImageUrlControl)
     .map((c) => ({ key: c.key, label: c.label, group: inferImageUrlGroup(c.key) }))
 }
 
@@ -391,6 +411,19 @@ function explicitVideoCatalogControls(config: VideoModelCatalogConfig | null): D
   })
 }
 
+// A free-form text/number control with no options, no default, and no
+// placeholder renders as an empty input box that carries no information and
+// no action value (e.g. kie's `callBackUrl` plumbing param). Drop it from the
+// node toolbar — boolean/select controls and anything with a default/options
+// stay. (Rule 2: 没有行动价值的信息 = 噪音 = 删)
+function isEmptyInputControl(control: ModelParameterControl): boolean {
+  if (control.type !== 'text' && control.type !== 'number') return false
+  if (control.options.length > 0) return false
+  const hasDefault = typeof control.defaultValue !== 'undefined' && String(control.defaultValue).trim() !== ''
+  const hasPlaceholder = typeof control.placeholder === 'string' && control.placeholder.trim() !== ''
+  return !hasDefault && !hasPlaceholder
+}
+
 function dedupeParamControls(controls: ModelParameterControl[]): ModelParameterControl[] {
   const usedKeys = new Set<string>()
   return controls.filter((control) => {
@@ -409,7 +442,9 @@ function buildDynamicControls(input: {
   isVideoLike: boolean
 }): DynamicModelControl[] {
   const paramControls = dedupeParamControls(
-    input.parameterControls.filter((c) => c.type !== 'image-url'),
+    // image-url-like params render as reference boxes at the top (buildImageUrlSlots),
+    // so they must NOT also appear in the bottom value row.
+    input.parameterControls.filter((c) => !looksLikeImageUrlControl(c) && !isEmptyInputControl(c)),
   )
   const controls: DynamicModelControl[] = paramControls.map((control) => ({
     ...control,
@@ -569,6 +604,24 @@ function buildModelControls(meta: unknown, isImageLike: boolean, isVideoLike: bo
 
 function hasConfigurableControls(meta: unknown, isImageLike: boolean, isVideoLike: boolean): boolean {
   return buildModelControls(meta, isImageLike, isVideoLike).length > 0
+}
+
+// Number of controls that render in the bottom value row for this node: the
+// model selector (always one) + every dynamic control the selected model
+// exposes. BaseGenerationNode uses this to widen the composer so the controls
+// stay readable when a model has many params, instead of squishing into
+// slivers. Model-agnostic — driven entirely by the catalog meta.
+export function useNodeParameterControlCount(node: GenerationCanvasNode): number {
+  const modelOptionsState = useGenerationModelOptionsState(node.kind)
+  const modelOptions = modelOptionsState.options
+  const isImageLike = isImageLikeGenerationNodeKind(node.kind)
+  const isVideoLike = isVideoLikeGenerationNodeKind(node.kind)
+  if (!isImageLike && !isVideoLike) return 0
+  const meta = node.meta || {}
+  const selectedModelValue = readMeta(meta, 'modelKey') || readMeta(meta, 'modelAlias') || readMeta(meta, 'imageModel') || readMeta(meta, 'videoModel')
+  const selectedModelOption = findModelOptionByIdentifier(modelOptions, selectedModelValue) || null
+  const controls = buildModelControls(selectedModelOption?.meta, isImageLike, isVideoLike)
+  return controls.length + 1
 }
 
 function chooseDefaultModelOption(
@@ -797,26 +850,47 @@ export default function NodeParameterControls({
             'text-ellipsis whitespace-nowrap',
             valueOnly && 'sr-only',
           )}>模型</span>
-          <select
-            className={cn(
-              'w-full min-w-0 h-6 pl-[7px] pr-[22px]',
-              'border border-nomi-line-soft rounded-[6px] outline-0',
-              'bg-nomi-ink-05 text-nomi-ink-80 font-[inherit] text-[10.5px]',
-              'focus:border-nomi-accent focus:bg-nomi-paper',
-              valueOnly && 'h-[30px] border-0 bg-nomi-ink-05 text-[11.5px] font-semibold',
-            )}
-            aria-label="模型"
-            value={modelOptions.length > 0 ? selectedModelOption?.value || '' : ''}
-            disabled={modelOptions.length === 0}
-            onChange={(event) => handleModelChange(event.target.value)}
-          >
-            <option value="">{modelOptions.length === 0 ? modelCatalogStatus.message : '选择模型'}</option>
-            {modelOptions.length > 0
-              ? modelOptions.map((option) => (
+          {modelOptions.length === 0 ? (
+            // v0.7.5: 没模型时显示明显的 "去配置 →" 按钮，不再只显示灰色文本
+            <button
+              type="button"
+              className={cn(
+                'w-full min-w-0 h-6 pl-[7px] pr-[7px] inline-flex items-center justify-between gap-1',
+                'border border-nomi-accent/30 rounded-[6px]',
+                'bg-nomi-accent-soft text-nomi-accent font-medium text-[10.5px]',
+                'hover:bg-nomi-accent hover:text-nomi-paper transition-colors cursor-pointer',
+                valueOnly && 'h-[30px] text-[11.5px]',
+              )}
+              aria-label="去配置模型"
+              title="点击打开模型接入页"
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                window.dispatchEvent(new CustomEvent('nomi-open-model-catalog'))
+              }}
+            >
+              <span className="truncate">{modelCatalogStatus.message}</span>
+              <span className="shrink-0">去配置 →</span>
+            </button>
+          ) : (
+            <select
+              className={cn(
+                'w-full min-w-0 h-6 pl-[7px] pr-[22px]',
+                'border border-nomi-line-soft rounded-[6px] outline-0',
+                'bg-nomi-ink-05 text-nomi-ink-80 font-[inherit] text-[10.5px]',
+                'focus:border-nomi-accent focus:bg-nomi-paper',
+                valueOnly && 'h-[30px] border-0 bg-nomi-ink-05 text-[11.5px] font-semibold',
+              )}
+              aria-label="模型"
+              value={selectedModelOption?.value || ''}
+              onChange={(event) => handleModelChange(event.target.value)}
+            >
+              <option value="">选择模型</option>
+              {modelOptions.map((option) => (
                 <option key={option.value || 'auto'} value={option.value}>{option.label}</option>
-              ))
-              : null}
-          </select>
+              ))}
+            </select>
+          )}
         </label>
       ) : null}
 

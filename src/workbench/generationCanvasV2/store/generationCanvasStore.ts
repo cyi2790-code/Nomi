@@ -10,6 +10,8 @@ import {
   upsertNode,
 } from '../model/graphOps'
 import { isGenerationNodeKind, isImageLikeGenerationNodeKind } from '../model/generationNodeKinds'
+import { nodeGroupSchema } from '../model/generationCanvasSchema'
+import { CATEGORY_IDS, type CategoryId } from '../model/generationCanvasTypes'
 import type {
   GenerationCanvasEdge,
   GenerationCanvasNode,
@@ -21,6 +23,7 @@ import type {
   GenerationNodeRunRecord,
   GenerationNodeStatus,
   GenerationNodeTaskKind,
+  NodeGroup,
 } from '../model/generationCanvasTypes'
 import type { WorkbenchAiMessage } from '../../ai/workbenchAiTypes'
 
@@ -55,6 +58,7 @@ type GenerationCanvasState = {
   persistRevision: number
   nodes: GenerationCanvasNode[]
   edges: GenerationCanvasEdge[]
+  groups: NodeGroup[]
   selectedNodeIds: string[]
   pendingConnectionSourceId: string
   canvasZoom: number
@@ -79,6 +83,7 @@ type GenerationCanvasState = {
   updateNodePrompt: (nodeId: string, prompt: string) => void
   moveNode: (nodeId: string, position: { x: number; y: number }, options?: CanvasMutationOptions) => void
   moveSelectedNodes: (delta: { x: number; y: number }, options?: CanvasMutationOptions) => void
+  moveGroupNodes: (groupId: string, delta: { x: number; y: number }, options?: CanvasMutationOptions) => void
   selectNodesInRect: (rect: GenerationCanvasSelectionRect, additive?: boolean) => void
   deleteSelectedNodes: () => void
   copySelectedNodes: () => void
@@ -88,6 +93,7 @@ type GenerationCanvasState = {
   redo: () => void
   selectNode: (nodeId: string, additive?: boolean) => void
   clearSelection: () => void
+  selectAllNodes: (categoryId?: string) => void
   startConnection: (nodeId: string) => void
   cancelConnection: () => void
   connectToNode: (targetNodeId: string) => void
@@ -100,6 +106,20 @@ type GenerationCanvasState = {
   trackNodeRun: (nodeId: string, runId: string, patch: NodeRunRecordPatch) => void
   addNodeResult: (nodeId: string, result: GenerationNodeResult) => void
   duplicateNodeForRegeneration: (nodeId: string) => GenerationCanvasNode | null
+  /** Phase E: move a node into a different category (sidebar drop / right-click). */
+  reassignNodeCategory: (nodeId: string, categoryId: string) => void
+  copyNodeToCategory: (nodeId: string, categoryId: string) => GenerationCanvasNode | null
+  deleteNode: (nodeId: string) => void
+  createGroup: (categoryId: string, name?: string) => NodeGroup | null
+  groupSelectedNodes: (categoryId: string, name?: string) => NodeGroup | null
+  renameGroup: (groupId: string, name: string) => void
+  setGroupColor: (groupId: string, color: string) => void
+  ungroup: (groupId: string) => void
+  ungroupGroups: (groupIds: string[]) => void
+  deleteGroup: (groupId: string, deleteNodes?: boolean) => void
+  moveNodeToGroup: (nodeId: string, groupId: string) => void
+  removeNodeFromGroup: (nodeId: string) => void
+  reorderGroup: (categoryId: string, activeGroupId: string, overGroupId: string) => void
   rollbackHistory: (nodeId: string, resultId: string) => void
   readSnapshot: () => GenerationCanvasSnapshot
   restoreSnapshot: (snapshot: unknown) => void
@@ -107,7 +127,7 @@ type GenerationCanvasState = {
 
 type GenerationCanvasHistoryState = Pick<
   GenerationCanvasState,
-  'nodes' | 'edges' | 'selectedNodeIds' | 'pendingConnectionSourceId'
+  'nodes' | 'edges' | 'groups' | 'selectedNodeIds' | 'pendingConnectionSourceId'
 >
 
 type GenerationCanvasClipboard = {
@@ -134,6 +154,10 @@ function shouldPersistCanvasMutation(options?: CanvasMutationOptions): boolean {
   return options?.persist !== false
 }
 
+function isCategoryId(value: unknown): value is CategoryId {
+  return typeof value === 'string' && (CATEGORY_IDS as readonly string[]).includes(value)
+}
+
 function bumpPersistRevision(state: Pick<GenerationCanvasState, 'persistRevision'>): void {
   state.persistRevision += 1
 }
@@ -153,12 +177,16 @@ const seedNodes = [
     title: '关键画面',
     x: 440,
     y: 380,
-    prompt: '承接上游提示词生成图片。',
+    prompt: '',
   }),
 ]
 
 function createNodeId(kind: GenerationNodeKind): string {
   return `gen-v2-${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+}
+
+function createGroupId(categoryId: CategoryId): string {
+  return `group-${categoryId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 }
 
 function createRunId(nodeId: string): string {
@@ -173,6 +201,7 @@ function snapshotHistoryState(state: GenerationCanvasState): GenerationCanvasHis
   return {
     nodes: state.nodes,
     edges: state.edges,
+    groups: state.groups,
     selectedNodeIds: state.selectedNodeIds,
     pendingConnectionSourceId: state.pendingConnectionSourceId,
   }
@@ -223,6 +252,7 @@ function cloneClipboardPayload(payload: GenerationCanvasClipboard): GenerationCa
   return {
     nodes,
     edges,
+    groups: [],
     selectedNodeIds: nodes.map((node) => node.id),
     pendingConnectionSourceId: '',
   }
@@ -272,6 +302,7 @@ function normalizeGenerationCanvasSnapshot(input: unknown): GenerationCanvasSnap
     return {
       nodes: seedNodes,
       edges: [{ id: 'edge-gen-v2-text-1-gen-v2-image-1', source: 'gen-v2-text-1', target: 'gen-v2-image-1' }],
+      groups: [],
       selectedNodeIds: [],
     }
   }
@@ -286,13 +317,17 @@ function normalizeGenerationCanvasSnapshot(input: unknown): GenerationCanvasSnap
         const x = typeof positionRaw.x === 'number' && Number.isFinite(positionRaw.x) ? positionRaw.x : 0
         const y = typeof positionRaw.y === 'number' && Number.isFinite(positionRaw.y) ? positionRaw.y : 0
         if (!id || !kind) return []
-        return [{
-          ...(node as GenerationCanvasNode),
+        const rawCategoryId = typeof node.categoryId === 'string' ? node.categoryId.trim() : undefined
+        const categoryId = isCategoryId(rawCategoryId) ? rawCategoryId : undefined
+        const { categoryId: _discardedCategoryId, ...nodeWithoutCategoryId } = node
+        const normalizedNode: Omit<GenerationCanvasNode, 'categoryId'> = {
+          ...(nodeWithoutCategoryId as Omit<GenerationCanvasNode, 'categoryId'>),
           id,
           kind,
           title: typeof node.title === 'string' ? node.title : id,
           position: { x, y },
-        }]
+        }
+        return [categoryId ? { ...normalizedNode, categoryId } : normalizedNode]
       })
     : []
   const nodeIds = new Set(nodes.map((node) => node.id))
@@ -313,6 +348,12 @@ function normalizeGenerationCanvasSnapshot(input: unknown): GenerationCanvasSnap
   return {
     nodes,
     edges,
+    groups: Array.isArray(raw.groups)
+      ? raw.groups.flatMap((group): NodeGroup[] => {
+          const parsed = nodeGroupSchema.safeParse(group)
+          return parsed.success ? [parsed.data] : []
+        })
+      : [],
     selectedNodeIds,
   }
 }
@@ -348,6 +389,7 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
   persistRevision: 0,
   nodes: seedNodes,
   edges: [{ id: 'edge-gen-v2-text-1-gen-v2-image-1', source: 'gen-v2-text-1', target: 'gen-v2-image-1' }],
+  groups: [],
   selectedNodeIds: [],
   pendingConnectionSourceId: '',
   canvasZoom: 1,
@@ -448,6 +490,26 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
       if (moved && shouldPersistCanvasMutation(options)) bumpPersistRevision(state)
     })
   },
+  moveGroupNodes: (groupId, delta, options) => {
+    set((state) => {
+      if (delta.x === 0 && delta.y === 0) return
+      const group = state.groups.find((candidate) => candidate.id === groupId)
+      if (!group?.nodeIds.length) return
+      const nodeIds = new Set(group.nodeIds)
+      let moved = false
+      for (const node of state.nodes) {
+        if (!nodeIds.has(node.id) || (node.categoryId || 'shots') !== group.categoryId) continue
+        node.position = {
+          x: Math.round(node.position.x + delta.x),
+          y: Math.round(node.position.y + delta.y),
+        }
+        moved = true
+      }
+      if (!moved) return
+      group.updatedAt = Date.now()
+      if (shouldPersistCanvasMutation(options)) bumpPersistRevision(state)
+    })
+  },
   selectNodesInRect: (rect, additive = false) => {
     set((state) => {
       const rectIds = state.nodes.filter((node) => nodeIntersectsRect(node, rect)).map((node) => node.id)
@@ -524,6 +586,7 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
     set((state) => {
       state.nodes = previous.nodes
       state.edges = previous.edges
+      state.groups = previous.groups
       state.selectedNodeIds = previous.selectedNodeIds
       state.pendingConnectionSourceId = previous.pendingConnectionSourceId
       bumpPersistRevision(state)
@@ -539,6 +602,7 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
     set((state) => {
       state.nodes = next.nodes
       state.edges = next.edges
+      state.groups = next.groups
       state.selectedNodeIds = next.selectedNodeIds
       state.pendingConnectionSourceId = next.pendingConnectionSourceId
       bumpPersistRevision(state)
@@ -559,6 +623,15 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
   },
   clearSelection: () => {
     set({ selectedNodeIds: [], pendingConnectionSourceId: '' })
+  },
+  // v0.7.5: 全选当前分类的所有节点（如果传 categoryId 则限定，否则全选画布所有节点）
+  selectAllNodes: (categoryId?: string) => {
+    set((state) => {
+      const ids = state.nodes
+        .filter((n) => !categoryId || (n.categoryId || 'shots') === categoryId)
+        .map((n) => n.id)
+      state.selectedNodeIds = ids
+    })
   },
   startConnection: (nodeId) => {
     set({ pendingConnectionSourceId: nodeId })
@@ -752,15 +825,287 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
       meta: node.meta ? { ...node.meta } : {},
       size: node.size ? { ...node.size } : nextNode.size,
       prompt: node.prompt || '',
+      categoryId: node.categoryId,
+      groupId: node.groupId,
+      derivedFrom: node.id,
     }
+    pushUndoSnapshot(state)
     set((current) => {
       const original = current.nodes.find((candidate) => candidate.id === nodeId)
       if (original && history.length) original.history = history
       current.nodes.push(copiedNode)
+      if (copiedNode.groupId) {
+        const group = current.groups.find((candidate) => candidate.id === copiedNode.groupId)
+        if (group && !group.nodeIds.includes(copiedNode.id)) {
+          group.nodeIds.push(copiedNode.id)
+          group.updatedAt = Date.now()
+        }
+      }
       current.selectedNodeIds = [copiedNode.id]
       bumpPersistRevision(current)
+      Object.assign(current, getHistoryFlags())
     })
     return copiedNode
+  },
+  reassignNodeCategory: (nodeId, categoryId) => {
+    const id = String(categoryId || '').trim()
+    if (!isCategoryId(id)) return
+    set((state) => {
+      const node = state.nodes.find((candidate) => candidate.id === nodeId)
+      if (!node) return
+      if (node.categoryId === id) return
+      node.categoryId = id
+      bumpPersistRevision(state)
+    })
+  },
+  copyNodeToCategory: (nodeId, categoryId) => {
+    const id = String(categoryId || '').trim()
+    if (!isCategoryId(id)) return null
+    const source = get().nodes.find((candidate) => candidate.id === nodeId)
+    if (!source) return null
+    const { id: _sourceId, categoryId: _sourceCategoryId, groupId: _sourceGroupId, ...rest } = source
+    const copiedNode: GenerationCanvasNode = {
+      ...rest,
+      id: createClipboardNodeId(source.id),
+      title: source.title ? `${source.title} 副本` : source.title,
+      position: {
+        x: source.position.x + CLIPBOARD_OFFSET,
+        y: source.position.y + CLIPBOARD_OFFSET,
+      },
+      categoryId: id,
+      derivedFrom: source.id,
+      references: source.references ? [...source.references] : undefined,
+      history: source.history ? [...source.history] : undefined,
+      runs: source.runs ? [...source.runs] : undefined,
+      meta: source.meta ? { ...source.meta } : undefined,
+      size: source.size ? { ...source.size } : source.size,
+    }
+    pushUndoSnapshot(get())
+    set((state) => {
+      state.nodes.push(copiedNode)
+      state.selectedNodeIds = [copiedNode.id]
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+    return copiedNode
+  },
+  deleteNode: (nodeId) => {
+    const current = get()
+    if (!current.nodes.some((candidate) => candidate.id === nodeId)) return
+    pushUndoSnapshot(current)
+    set((state) => {
+      const next = removeNodes(state.nodes, state.edges, [nodeId])
+      state.nodes = next.nodes
+      state.edges = next.edges
+      state.groups = state.groups.map((group) => ({
+        ...group,
+        nodeIds: group.nodeIds.filter((candidateNodeId) => candidateNodeId !== nodeId),
+      }))
+      state.selectedNodeIds = state.selectedNodeIds.filter((candidateNodeId) => candidateNodeId !== nodeId)
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  createGroup: (categoryId, name) => {
+    const id = String(categoryId || '').trim()
+    if (!isCategoryId(id)) return null
+    const now = Date.now()
+    const existingCount = get().groups.filter((group) => group.categoryId === id).length
+    const group: NodeGroup = {
+      id: createGroupId(id),
+      name: (name || '').trim() || `组 ${existingCount + 1}`,
+      categoryId: id,
+      nodeIds: [],
+      createdAt: now,
+      updatedAt: now,
+    }
+    pushUndoSnapshot(get())
+    set((state) => {
+      state.groups.push(group)
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+    return group
+  },
+  groupSelectedNodes: (categoryId, name) => {
+    const id = String(categoryId || '').trim()
+    if (!isCategoryId(id)) return null
+    const current = get()
+    const selected = new Set(current.selectedNodeIds)
+    const nodeIds = current.nodes
+      .filter((node) => selected.has(node.id) && (node.categoryId || 'shots') === id)
+      .map((node) => node.id)
+    if (nodeIds.length < 2) return null
+    const now = Date.now()
+    const existingCount = current.groups.filter((group) => group.categoryId === id).length
+    const group: NodeGroup = {
+      id: createGroupId(id),
+      name: (name || '').trim() || `组 ${existingCount + 1}`,
+      categoryId: id,
+      nodeIds,
+      createdAt: now,
+      updatedAt: now,
+    }
+    pushUndoSnapshot(current)
+    set((state) => {
+      for (const existingGroup of state.groups) {
+        existingGroup.nodeIds = existingGroup.nodeIds.filter((nodeId) => !nodeIds.includes(nodeId))
+      }
+      for (const node of state.nodes) {
+        if (nodeIds.includes(node.id)) node.groupId = group.id
+      }
+      state.groups.push(group)
+      state.selectedNodeIds = nodeIds
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+    return group
+  },
+  renameGroup: (groupId, name) => {
+    const nextName = String(name || '').trim()
+    if (!nextName) return
+    const current = get()
+    const existing = current.groups.find((group) => group.id === groupId)
+    if (!existing || existing.name === nextName) return
+    pushUndoSnapshot(current)
+    set((state) => {
+      const group = state.groups.find((candidate) => candidate.id === groupId)
+      if (!group) return
+      group.name = nextName
+      group.updatedAt = Date.now()
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  setGroupColor: (groupId, color) => {
+    const nextColor = String(color || '').trim()
+    if (!nextColor) return
+    const current = get()
+    const existing = current.groups.find((group) => group.id === groupId)
+    if (!existing || existing.color === nextColor) return
+    pushUndoSnapshot(current)
+    set((state) => {
+      const group = state.groups.find((candidate) => candidate.id === groupId)
+      if (!group) return
+      group.color = nextColor
+      group.updatedAt = Date.now()
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  ungroup: (groupId) => {
+    const current = get()
+    const existing = current.groups.find((group) => group.id === groupId)
+    if (!existing) return
+    pushUndoSnapshot(current)
+    set((state) => {
+      const group = state.groups.find((candidate) => candidate.id === groupId)
+      if (!group) return
+      const nodeIds = new Set(group.nodeIds)
+      for (const node of state.nodes) {
+        if (nodeIds.has(node.id)) delete node.groupId
+      }
+      state.groups = state.groups.filter((candidate) => candidate.id !== groupId)
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  ungroupGroups: (groupIds) => {
+    const current = get()
+    const targets = new Set(groupIds)
+    if (!targets.size || !current.groups.some((group) => targets.has(group.id))) return
+    pushUndoSnapshot(current)
+    set((state) => {
+      const nodeIds = new Set<string>()
+      for (const group of state.groups) {
+        if (!targets.has(group.id)) continue
+        group.nodeIds.forEach((nodeId) => nodeIds.add(nodeId))
+      }
+      for (const node of state.nodes) {
+        if (nodeIds.has(node.id)) delete node.groupId
+      }
+      state.groups = state.groups.filter((candidate) => !targets.has(candidate.id))
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  deleteGroup: (groupId, deleteNodes = false) => {
+    const current = get()
+    const existing = current.groups.find((group) => group.id === groupId)
+    if (!existing) return
+    pushUndoSnapshot(current)
+    set((state) => {
+      const group = state.groups.find((candidate) => candidate.id === groupId)
+      if (!group) return
+      const nodeIds = new Set(group.nodeIds)
+      if (deleteNodes) {
+        const next = removeNodes(state.nodes, state.edges, Array.from(nodeIds))
+        state.nodes = next.nodes
+        state.edges = next.edges
+        state.selectedNodeIds = state.selectedNodeIds.filter((nodeId) => !nodeIds.has(nodeId))
+      } else {
+        for (const node of state.nodes) {
+          if (nodeIds.has(node.id)) delete node.groupId
+        }
+      }
+      state.groups = state.groups.filter((candidate) => candidate.id !== groupId)
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  moveNodeToGroup: (nodeId, groupId) => {
+    const id = String(groupId || '').trim()
+    if (!id) return
+    const current = get()
+    const sourceNode = current.nodes.find((candidate) => candidate.id === nodeId)
+    const targetGroup = current.groups.find((candidate) => candidate.id === id)
+    if (!sourceNode || !targetGroup || sourceNode.categoryId !== targetGroup.categoryId) return
+    pushUndoSnapshot(current)
+    set((state) => {
+      const node = state.nodes.find((candidate) => candidate.id === nodeId)
+      const group = state.groups.find((candidate) => candidate.id === id)
+      if (!node || !group || node.categoryId !== group.categoryId) return
+      for (const candidate of state.groups) {
+        candidate.nodeIds = candidate.nodeIds.filter((candidateNodeId) => candidateNodeId !== nodeId)
+      }
+      node.groupId = group.id
+      if (!group.nodeIds.includes(nodeId)) group.nodeIds.push(nodeId)
+      group.updatedAt = Date.now()
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  removeNodeFromGroup: (nodeId) => {
+    pushUndoSnapshot(get())
+    set((state) => {
+      const node = state.nodes.find((candidate) => candidate.id === nodeId)
+      if (!node?.groupId) return
+      for (const group of state.groups) {
+        group.nodeIds = group.nodeIds.filter((candidateNodeId) => candidateNodeId !== nodeId)
+      }
+      delete node.groupId
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
+  },
+  reorderGroup: (categoryId, activeGroupId, overGroupId) => {
+    const id = String(categoryId || '').trim()
+    if (!isCategoryId(id) || activeGroupId === overGroupId) return
+    pushUndoSnapshot(get())
+    set((state) => {
+      const categoryGroups = state.groups.filter((group) => group.categoryId === id)
+      const activeIndex = categoryGroups.findIndex((group) => group.id === activeGroupId)
+      const overIndex = categoryGroups.findIndex((group) => group.id === overGroupId)
+      if (activeIndex < 0 || overIndex < 0) return
+      const reordered = [...categoryGroups]
+      const [active] = reordered.splice(activeIndex, 1)
+      if (!active) return
+      reordered.splice(overIndex, 0, active)
+      const queue = [...reordered]
+      state.groups = state.groups.map((group) => group.categoryId === id ? queue.shift() || group : group)
+      bumpPersistRevision(state)
+      Object.assign(state, getHistoryFlags())
+    })
   },
   rollbackHistory: (nodeId, resultId) => {
     set((state) => {
@@ -775,6 +1120,7 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
     return {
       nodes: state.nodes,
       edges: state.edges,
+      groups: state.groups,
       selectedNodeIds: state.selectedNodeIds,
     }
   },
@@ -788,6 +1134,7 @@ export const useGenerationCanvasStore = create<GenerationCanvasState>()(subscrib
       persistRevision: get().persistRevision,
 	      nodes: normalized.nodes,
       edges: normalized.edges,
+      groups: normalized.groups,
       selectedNodeIds: normalized.selectedNodeIds,
       pendingConnectionSourceId: '',
       canvasZoom: 1,

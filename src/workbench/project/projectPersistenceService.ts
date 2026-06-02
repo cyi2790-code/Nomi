@@ -1,11 +1,22 @@
 import { readLocalProject, saveLocalProject, type LocalProjectSummary } from '../library/localProjectStore'
-import { upgradeWorkbenchProjectMediaUrls } from './projectMediaMigration'
+import { upgradeWorkbenchProjectMediaUrls, normalizeLegacyImageAssetKinds } from './projectMediaMigration'
 import {
   clearActiveWorkbenchProjectSaveTarget,
   restoreWorkbenchProjectPayload,
   subscribeWorkbenchProjectPersistence,
 } from './workbenchProjectSession'
 import type { WorkbenchProjectPayload, WorkbenchProjectRecordV1 } from './projectRecordSchema'
+import { migrateProjectRecord, type CategoryMigrationDiagnostic } from './projectCategoryMigration'
+import { migrateProjectV51ToV60 } from './projectV51ToV60Migration'
+
+let lastCategoryMigrationDiagnostic: CategoryMigrationDiagnostic | null = null
+
+/** Returns + clears the most recent Phase E4 migration diagnostic (for toast UI). */
+export function consumeCategoryMigrationDiagnostic(): CategoryMigrationDiagnostic | null {
+  const value = lastCategoryMigrationDiagnostic
+  lastCategoryMigrationDiagnostic = null
+  return value
+}
 
 const LAST_ACTIVE_PROJECT_KEY = 'nomi-workbench-last-active-project-v1'
 
@@ -79,8 +90,16 @@ export function createWorkbenchProjectPersistenceService(deps: Dependencies): Wo
     const project = readLocalProject(projectId)
     if (!project) return null
     clearActiveWorkbenchProjectSaveTarget()
-    const upgraded = await upgradeWorkbenchProjectMediaUrls(project)
-    if (upgraded !== project) {
+    const mediaUpgraded = await upgradeWorkbenchProjectMediaUrls(project)
+    const { record: catUpgraded, diagnostic } = migrateProjectRecord(mediaUpgraded)
+    const { record: v60Upgraded } = migrateProjectV51ToV60(catUpgraded)
+    // A1.5：历史导入/切图/裁剪/截图的 image 节点改判为 asset（素材卡）。
+    const upgraded = normalizeLegacyImageAssetKinds(v60Upgraded)
+    const changed = upgraded !== project
+    if (!diagnostic.alreadyMigrated && (diagnostic.migratedNodes > 0 || diagnostic.removedNodes > 0 || diagnostic.categoriesSeeded)) {
+      lastCategoryMigrationDiagnostic = diagnostic
+    }
+    if (changed) {
       saveLocalProject(upgraded.id, upgraded.payload, upgraded.name)
     }
     restoreWorkbenchProjectPayload(upgraded.payload)

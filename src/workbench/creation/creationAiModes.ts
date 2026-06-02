@@ -1,6 +1,7 @@
 import type { CreationDocumentAction, CreationDocumentActionType, WorkbenchDocument } from '../workbenchTypes'
 
 export type CreationAiModeId =
+  | 'general'
   | 'story'
   | 'script'
   | 'assets'
@@ -15,9 +16,20 @@ export type CreationAiMode = {
   title: string
   description: string
   prompt: string
+  /** 纯问答模式：不套创作人格、不注入 documentTools 写文档协议。 */
+  chatOnly?: boolean
 }
 
 export const CREATION_AI_MODES: CreationAiMode[] = [
+  {
+    id: 'general',
+    label: '通用问答',
+    shortLabel: '通用',
+    title: '通用助手',
+    description: '像普通 AI 一样直接回答，不强制套创作模板、不写入文稿。',
+    prompt: '你是 Nomi 创作区的通用 AI 助手。直接、简洁地回答用户的问题或请求，语言与用户保持一致。不要强行套用任何创作模板或人格，也不要主动改写文稿。',
+    chatOnly: true,
+  },
   {
     id: 'story',
     label: '写故事',
@@ -76,7 +88,7 @@ export const CREATION_AI_MODES: CreationAiMode[] = [
     title: 'Seedance 提示词',
     description: '生成可复制到 Seedance 2.0 的最终提示词。',
     prompt: [
-      '你是 Seedance 2.0 提示词专家。输出可直接用于视频生成的中文时间轴提示词。',
+      '你是 Seedance 2.0 提示词专家。输出可直接用于视频生成的时间轴提示词，语言与用户保持一致。',
       '格式：风格描述、15秒、画幅、整体氛围；然后按 0-3秒/3-6秒/6-9秒/9-12秒/12-15秒写画面。',
       '使用明确运镜词：推镜头、拉镜头、摇镜头、移镜头、跟镜头、环绕镜头、升降镜头、希区柯克变焦、一镜到底、手持晃动。',
       '如果是续集，保留“将@视频1延长15s”的开头，并说明 @图片/@视频 引用用途。',
@@ -202,6 +214,18 @@ export function buildCreationAiPrompt(input: {
   const request = input.userRequest.trim()
   const selectedText = input.selectedText.trim()
   const documentText = input.documentText.trim()
+  // 通用问答：纯聊天，不注入写文档协议，文稿/选区仅作参考上下文。
+  if (input.mode.chatOnly) {
+    return [
+      input.mode.prompt,
+      '',
+      selectedText ? `用户当前选中的文字（仅供参考）：\n${selectedText}` : '',
+      documentText ? `用户当前文稿（仅供参考，未必相关）：\n${documentText}` : '',
+      '',
+      '用户问题：',
+      request || '（用户未输入文字，请礼貌询问需要什么帮助）',
+    ].filter(Boolean).join('\n')
+  }
   return [
     input.mode.prompt,
     '',

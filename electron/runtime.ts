@@ -1,7 +1,46 @@
-import { app } from "electron";
+import { app, safeStorage } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { hardenedFetch, hardenedFetchText } from "./hardenedFetch";
+import { generateText, streamText, tool } from "ai";
+import { z } from "zod";
+import { buildAiSdkModel } from "./ai/buildAiSdkModel";
+import { mergeMissingParamsIntoBody } from "./ai/onboarding/curlBlueprint";
+import { assertProjectExportRelativePath, ensureExportDirs } from "./export/exportPaths";
+import { ExportJobManager, type ExportJobEvent, type ExportJobSnapshot } from "./export/exportJobManager";
+import { assertValidManifest, type NomiRenderManifestV1 } from "./export/exportManifest";
+import { planExport } from "./export/exportPlanner";
+import { ExportCancelledError, transcodeWebmFileToMp4, transcodeWebmToMp4 } from "./export/ffmpegRunner";
+import { appendExportTempInputChunk, finishExportTempInput as finishExportTempInputFile, removeExportTempInput } from "./export/exportTempInput";
+import {
+  canvasNodeKindSchema,
+  plannedEdgeSchema,
+  plannedNodeSchema,
+  type CanvasToolName,
+} from "./ai/canvasTools";
+import {
+  type AuthType,
+  appendQueryParams,
+  authHeaders as buildAuthHeaders,
+  authQueryParams as buildAuthQueryParams,
+  buildHttpRequest,
+  buildTemplateContext,
+  extractTaskId as extractTaskIdShared,
+  looksLikeLogicalError,
+} from "./ai/requestPipeline";
+import { discoverLegacyProjects, isLegacyProjectSuppressed, suppressLegacyProjectRediscovery } from "./workspace/legacyProjectMigration";
+import {
+  createWorkspaceProject,
+  listWorkspaceProjects,
+  readWorkspaceProject,
+  removeWorkspaceProjectReference,
+  resolveWorkspaceProjectDir,
+  saveWorkspaceProject,
+  type WorkspaceRepositoryDeps,
+} from "./workspace/workspaceRepository";
+import { rememberWorkspace } from "./workspace/workspaceRegistry";
+import { resolveWorkspaceRelativePath } from "./workspace/workspacePaths";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -16,9 +55,11 @@ type ProjectRecord = {
   thumbnailUrls?: string[];
   version: number;
   payload?: unknown;
+  rootPath?: string;
+  missing?: boolean;
 };
 
-type BillingModelKind = "text" | "image" | "video";
+type BillingModelKind = "text" | "image" | "video" | "audio";
 type ProfileKind =
   | "chat"
   | "prompt_refine"
@@ -26,7 +67,11 @@ type ProfileKind =
   | "image_to_prompt"
   | "image_to_video"
   | "text_to_video"
-  | "image_edit";
+  | "image_edit"
+  | "text_to_audio"
+  | "image_to_audio";
+
+type AiSdkProviderKind = "openai-compatible" | "anthropic";
 
 type Vendor = {
   key: string;
@@ -37,6 +82,12 @@ type Vendor = {
   authType?: "none" | "bearer" | "x-api-key" | "query";
   authHeader?: string | null;
   authQueryParam?: string | null;
+  /**
+   * Which Vercel AI SDK provider implementation to use for this vendor.
+   * Optional; absent / unknown values fall back to "openai-compatible"
+   * so existing model-catalog.json files keep working without migration.
+   */
+  providerKind?: AiSdkProviderKind;
   meta?: unknown;
   createdAt: string;
   updatedAt: string;
@@ -57,32 +108,92 @@ type Model = {
     updatedAt?: string;
     specCosts: Array<{ specKey: string; cost: number; enabled: boolean; createdAt?: string; updatedAt?: string }>;
   };
+  /**
+   * Catalog v2+: present when this model was produced by the onboarding agent.
+   * Carries the doc-quote evidence per parameter so we can audit / re-trial later.
+   */
+  onboarding?: {
+    addedVia: "agent" | "manual";
+    trialId?: string;
+    docsUrl?: string;
+    addedAt: string;
+    fields: Array<{
+      key: string;
+      displayName: string;
+      type: "select" | "number" | "text" | "boolean" | "image-url";
+      options?: Array<{ value: string; label: string }>;
+      default?: string;
+      evidence: {
+        field: string;
+        evidence: string;
+        evidence_location: string;
+        confidence: "high" | "medium" | "low";
+      };
+    }>;
+  };
   createdAt: string;
   updatedAt: string;
 };
 
+/**
+ * A single HTTP call template: method + path (relative to vendor.baseUrl, or
+ * absolute), headers, query, body. String values may contain `{{...}}`
+ * placeholders resolved by `renderTemplateValue` against the request context.
+ * `response_mapping` / `provider_meta_mapping` describe how to read the
+ * upstream response (used by `buildProfileTaskResult`).
+ */
+type HttpOperation = {
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  query?: Record<string, unknown>;
+  body?: unknown;
+  response_mapping?: Record<string, unknown>;
+  provider_meta_mapping?: Record<string, unknown>;
+};
+
+/**
+ * One (vendor, taskKind) → one mapping row. `create` is the synchronous POST
+ * (or whatever initiates the task). `query` is the poll for async APIs.
+ * Vendors that map their status strings to ours can use `statusMapping`
+ * (e.g. `{ succeeded: ["completed", "done"] }`).
+ */
 type Mapping = {
   id: string;
   vendorKey: string;
   taskKind: ProfileKind;
   name: string;
   enabled: boolean;
-  requestMapping?: unknown;
-  responseMapping?: unknown;
+  create: HttpOperation;
+  query?: HttpOperation;
+  statusMapping?: Record<string, string[]>;
   createdAt: string;
   updatedAt: string;
 };
 
 type ApiKeyRecord = {
   vendorKey: string;
+  /** Key material. Encoding indicated by `enc`. Legacy v1 records have no `enc` and are plaintext. */
   apiKey: string;
+  /** v2+: how the apiKey above is encoded. Absent = legacy plaintext (v1). */
+  enc?: "safeStorage" | "plain";
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
 };
 
+/** Catalog version.
+ *  v2 added Model.onboarding + ApiKeyRecord.enc.
+ *  v3 collapsed Mapping.{requestMapping,responseMapping} (which used to wrap
+ *  things in a v2 envelope `{version, create:{default}, query:{default}}`) into
+ *  flat Mapping.{create,query} HttpOperation fields. Old rows are normalized
+ *  in `migrateCatalogForward`.
+ */
+type CatalogVersion = 1 | 2 | 3;
+const CURRENT_CATALOG_VERSION: CatalogVersion = 3;
+
 type CatalogState = {
-  version: 1;
+  version: CatalogVersion;
   vendors: Vendor[];
   models: Model[];
   mappings: Mapping[];
@@ -101,6 +212,32 @@ type TaskRequest = {
   extras?: Record<string, unknown>;
 };
 
+type TimelineMp4ExportRequest = {
+  projectId?: string;
+  webmBytes?: ArrayBuffer | Uint8Array | number[];
+  outputName?: string;
+  resolution?: "720p" | "1080p";
+  aspectRatio?: "16:9" | "9:16" | "1:1" | "4:5" | "3:4" | "4:3" | "21:9";
+  quality?: "small" | "standard" | "high";
+  fps?: number;
+};
+
+type ShowExportInFolderRequest = {
+  projectId?: string;
+  relativePath?: string;
+};
+
+type ExportJobStartRequest = {
+  projectId?: string;
+  manifest?: unknown;
+  outputName?: string;
+};
+
+type ExportTempInputRequest = {
+  jobId?: string;
+  chunk?: ArrayBuffer | Uint8Array | number[];
+};
+
 type TaskResult = {
   id: string;
   kind: ProfileKind;
@@ -114,6 +251,20 @@ type TaskResult = {
     assetName?: string | null;
   }>;
   raw: unknown;
+  /**
+   * E11: Complete provenance for reproducibility. Populated on successful
+   * generation. Renderer copies this into GenerationNodeResult.provenance.
+   */
+  provenance?: {
+    provider?: string;
+    modelKey?: string;
+    prompt?: string;
+    negativePrompt?: string;
+    seed?: number;
+    params?: Record<string, unknown>;
+    vendorRequestId?: string;
+    timestamp: number;
+  };
 };
 
 const PROJECT_FILE = "project.json";
@@ -121,6 +272,7 @@ const PROJECT_ROOT_ENV = "NOMI_PROJECTS_DIR";
 const CATALOG_FILE = "model-catalog.json";
 const SKILLS_ROOT_ENV = "NOMI_SKILLS_DIR";
 const taskCache = new Map<string, CachedTask>();
+const exportJobManager = new ExportJobManager();
 
 type CachedTask = {
   vendor: string;
@@ -170,6 +322,13 @@ function getProjectsRoot(): string {
 
 function getSettingsRoot(): string {
   return app.getPath("userData");
+}
+
+function getWorkspaceRepositoryDeps(): WorkspaceRepositoryDeps {
+  return {
+    settingsRoot: getSettingsRoot(),
+    defaultProjectsRoot: getProjectsRoot(),
+  };
 }
 
 function getSkillsRoots(): string[] {
@@ -281,6 +440,17 @@ function findSkillRecord(skillKey: string, skillName: string): SkillRecord | nul
   )) || null;
 }
 
+/**
+ * Universal language directive injected into every agent chat (v1 + v2),
+ * regardless of which area or skill triggered it. Single source of truth so we
+ * never have to repeat "reply in the user's language" in each prompt builder.
+ */
+const AGENT_LANGUAGE_DIRECTIVE = [
+  "语言规则（最高优先级，覆盖一切其他指令）：",
+  "始终用与用户相同的自然语言回复——用户用中文你就用中文，用英文就用英文，用日文就用日文。",
+  "永远不要因为本系统提示或某个 skill 是用中文/英文写的，就固定用那种语言；以用户最近一条消息的语言为准。",
+].join("\n");
+
 function buildSkillSystemPrompt(payload: JsonRecord): string {
   const requested = readRequestedSkill(payload);
   if (!requested.key && !requested.name) return "";
@@ -349,24 +519,29 @@ function normalizeProjectRecord(input: unknown): ProjectRecord {
   };
 }
 
-function projectDirById(projectId: string): string | null {
+function legacyProjectDirById(projectId: string): string | null {
   const root = getProjectsRoot();
   ensureDir(root);
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectFile = path.join(root, entry.name, PROJECT_FILE);
+    const projectDir = path.join(root, entry.name);
+    if (isLegacyProjectSuppressed(projectDir)) continue;
     if (!fs.existsSync(projectFile)) continue;
     const record = readJson<ProjectRecord | null>(projectFile, null);
-    if (record?.id === projectId) return path.join(root, entry.name);
+    if (record?.id === projectId) return projectDir;
   }
   return null;
+}
+
+function projectDirById(projectId: string): string | null {
+  return resolveWorkspaceProjectDir(projectId, getWorkspaceRepositoryDeps()) || legacyProjectDirById(projectId);
 }
 
 function ensureProjectFolders(projectDir: string): void {
   ensureDir(projectDir);
   ensureDir(path.join(projectDir, "assets"));
-  ensureDir(path.join(projectDir, "exports"));
-  ensureDir(path.join(projectDir, "cache"));
+  ensureExportDirs(projectDir);
 }
 
 function toSummary(record: ProjectRecord): Omit<ProjectRecord, "payload"> {
@@ -374,38 +549,48 @@ function toSummary(record: ProjectRecord): Omit<ProjectRecord, "payload"> {
   return summary;
 }
 
+function getInputRootPath(input: unknown): string | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const rootPath = (input as JsonRecord).rootPath;
+  return typeof rootPath === "string" && rootPath.trim() ? rootPath.trim() : null;
+}
+
 export function listProjects(): Array<Omit<ProjectRecord, "payload">> {
-  const root = getProjectsRoot();
-  ensureDir(root);
-  const projects: Array<Omit<ProjectRecord, "payload">> = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const record = readJson<ProjectRecord | null>(path.join(root, entry.name, PROJECT_FILE), null);
-    if (record?.id) projects.push(toSummary(normalizeProjectRecord(record)));
+  const deps = getWorkspaceRepositoryDeps();
+  for (const legacyProject of discoverLegacyProjects(deps.defaultProjectsRoot)) {
+    rememberWorkspace(deps.settingsRoot, legacyProject);
   }
-  return projects.sort((a, b) => b.updatedAt - a.updatedAt);
+  return listWorkspaceProjects(deps).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export function createProject(input: unknown): ProjectRecord {
-  const root = getProjectsRoot();
-  ensureDir(root);
-  const record = normalizeProjectRecord(input);
-  const projectDir = uniqueDir(root, record.name);
-  ensureProjectFolders(projectDir);
-  writeJson(path.join(projectDir, PROJECT_FILE), record);
-  return record;
+  const rootPath = getInputRootPath(input);
+  if (rootPath) {
+    return createWorkspaceProject({ rootPath, record: input }, getWorkspaceRepositoryDeps());
+  }
+
+  throw new Error("rootPath is required to create a desktop workspace project");
 }
 
 export function readProject(projectId: string): ProjectRecord | null {
-  const projectDir = projectDirById(String(projectId || "").trim());
+  const id = String(projectId || "").trim();
+  const workspaceRecord = readWorkspaceProject(id, getWorkspaceRepositoryDeps());
+  if (workspaceRecord) return workspaceRecord;
+
+  const projectDir = legacyProjectDirById(id);
   if (!projectDir) return null;
   return normalizeProjectRecord(readJson<ProjectRecord>(path.join(projectDir, PROJECT_FILE), {} as ProjectRecord));
 }
 
 export function saveProject(projectId: string, input: unknown): ProjectRecord {
   const id = String(projectId || "").trim();
+  if (readWorkspaceProject(id, getWorkspaceRepositoryDeps())) {
+    return saveWorkspaceProject(id, input, getWorkspaceRepositoryDeps());
+  }
+
+  const projectDir = legacyProjectDirById(id);
+  if (!projectDir) throw new Error("Cannot save unknown workspace project");
   const record = normalizeProjectRecord({ ...(input as JsonRecord), id });
-  const projectDir = projectDirById(id) || uniqueDir(getProjectsRoot(), record.name);
   ensureProjectFolders(projectDir);
   writeJson(path.join(projectDir, PROJECT_FILE), record);
   return record;
@@ -414,8 +599,21 @@ export function saveProject(projectId: string, input: unknown): ProjectRecord {
 export function deleteProject(projectId: string): { id: string; deleted: boolean } {
   const id = String(projectId || "").trim();
   if (!id) throw new Error("projectId is required");
-  const projectDir = projectDirById(id);
+  if (readWorkspaceProject(id, getWorkspaceRepositoryDeps())) {
+    const workspaceDir = resolveWorkspaceProjectDir(id, getWorkspaceRepositoryDeps());
+    const result = removeWorkspaceProjectReference(id, getWorkspaceRepositoryDeps());
+    if (workspaceDir && fs.existsSync(path.join(workspaceDir, PROJECT_FILE))) {
+      suppressLegacyProjectRediscovery(workspaceDir);
+    }
+    return result;
+  }
+
+  const projectDir = legacyProjectDirById(id);
   if (!projectDir) return { id, deleted: false };
+  if (fs.existsSync(path.join(projectDir, ".nomi", PROJECT_FILE))) {
+    suppressLegacyProjectRediscovery(projectDir);
+    return { id, deleted: false };
+  }
   const root = path.resolve(getProjectsRoot());
   const resolvedProjectDir = path.resolve(projectDir);
   const rootWithSep = `${root}${path.sep}`;
@@ -429,12 +627,249 @@ export function deleteProject(projectId: string): { id: string; deleted: boolean
 export function resolveProjectRelativePath(projectId: string, relativePath: string): string {
   const projectDir = projectDirById(String(projectId || "").trim());
   if (!projectDir) throw new Error("Project not found");
-  const resolved = path.resolve(projectDir, String(relativePath || ""));
-  const rootWithSep = `${path.resolve(projectDir)}${path.sep}`;
-  if (resolved !== path.resolve(projectDir) && !resolved.startsWith(rootWithSep)) {
-    throw new Error("Path escapes project root");
+  const value = String(relativePath || "");
+  if (!value.trim()) return path.resolve(projectDir);
+  return resolveWorkspaceRelativePath(projectDir, value);
+}
+
+function bufferFromExportBytes(input: TimelineMp4ExportRequest["webmBytes"]): Buffer {
+  if (input instanceof ArrayBuffer) return Buffer.from(input);
+  if (ArrayBuffer.isView(input)) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  if (Array.isArray(input)) return Buffer.from(input);
+  throw new Error("导出失败：缺少 WebM 输入数据");
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasUnresolvedRendererAssets(manifest: NomiRenderManifestV1): boolean {
+  return Object.values(manifest.assets).some((asset) => !isPlainRecord(asset) || typeof asset.absolutePath !== "string");
+}
+
+function isCurrentWebmTransitionRendererManifest(value: unknown): value is Record<string, unknown> {
+  if (!isPlainRecord(value)) return false;
+  const diagnostics = value.diagnostics;
+  if (!isPlainRecord(diagnostics) || !Array.isArray(diagnostics.warnings)) return false;
+  return diagnostics.warnings.some((warning) => typeof warning === "string" && /webm|capture|renderer|unresolved|unsupported tracks/i.test(warning));
+}
+
+function sanitizeCurrentWebmTransitionManifest(value: Record<string, unknown>): unknown {
+  const timeline = isPlainRecord(value.timeline) ? value.timeline : {};
+  return {
+    ...value,
+    timeline: {
+      ...timeline,
+      tracks: [],
+    },
+    assets: {},
+  };
+}
+
+function parseExportJobManifest(value: unknown): NomiRenderManifestV1 {
+  const manifestValue = isCurrentWebmTransitionRendererManifest(value) ? sanitizeCurrentWebmTransitionManifest(value) : value;
+  if (isPlainRecord(manifestValue) && isPlainRecord(manifestValue.assets)) {
+    for (const asset of Object.values(manifestValue.assets)) {
+      if (isPlainRecord(asset) && ("url" in asset || "absolutePath" in asset)) {
+        throw new Error("Export job asset resolution is not wired yet; renderer assets cannot start a production export job.");
+      }
+    }
   }
-  return resolved;
+  assertValidManifest(manifestValue);
+  if (hasUnresolvedRendererAssets(manifestValue)) {
+    throw new Error("Export job asset resolution is not wired yet; manifest assets must include absolutePath.");
+  }
+  return manifestValue;
+}
+
+export function startExportJob(payload: unknown): { jobId: string } {
+  const raw = (payload || {}) as ExportJobStartRequest;
+  const projectId = String(raw.projectId || "").trim();
+  if (!projectId) throw new Error("projectId is required");
+  const projectDir = projectDirById(projectId);
+  if (!projectDir) throw new Error("Project not found");
+  ensureProjectFolders(projectDir);
+  const manifest = parseExportJobManifest(raw.manifest);
+  if (manifest.projectId !== projectId) {
+    throw new Error("Export job projectId must match manifest.projectId");
+  }
+  const plan = planExport(manifest);
+  const job = exportJobManager.createJob({ projectId, projectDir, manifest, outputName: raw.outputName });
+  exportJobManager.updateJob(job.id, {
+    status: "planning",
+    progress: { ratio: 0.02, stage: "planning", message: `Planned ${plan.backend} export backend` },
+  });
+  return { jobId: job.id };
+}
+
+export function getExportJobStatus(jobId: string): ExportJobSnapshot {
+  const id = String(jobId || "").trim();
+  if (!id) throw new Error("jobId is required");
+  const snapshot = exportJobManager.getJob(id);
+  if (!snapshot) throw new Error(`Export job ${id} was not found`);
+  return snapshot;
+}
+
+export async function cancelExportJob(jobId: string): Promise<{ ok: true }> {
+  const id = String(jobId || "").trim();
+  if (!id) throw new Error("jobId is required");
+  const job = exportJobManager.getJob(id);
+  activeExportAbortControllers.get(id)?.abort();
+  await exportJobManager.cancelJob(id);
+  if (job) removeExportTempInput(job);
+  return { ok: true };
+}
+
+const EXPORT_TEMP_INPUT_WRITABLE_STATUSES = new Set(["queued", "preparing", "planning", "rendering", "encoding", "muxing", "finalizing"]);
+const activeExportAbortControllers = new Map<string, AbortController>();
+
+function requireWritableExportJob(jobId: unknown): ExportJobSnapshot {
+  const id = String(jobId || "").trim();
+  if (!id) throw new Error("jobId is required");
+  const job = exportJobManager.getJob(id);
+  if (!job) throw new Error(`Export job ${id} was not found`);
+  if (job.cancelled || !EXPORT_TEMP_INPUT_WRITABLE_STATUSES.has(job.status)) {
+    throw new Error(`Cannot write temp input for export job ${id} while it is ${job.status}`);
+  }
+  return job;
+}
+
+function aspectRatioFromProfile(profile: NomiRenderManifestV1["profile"]): TimelineMp4ExportRequest["aspectRatio"] {
+  const ratio = profile.width / profile.height;
+  const candidates: Array<{ value: NonNullable<TimelineMp4ExportRequest["aspectRatio"]>; ratio: number }> = [
+    { value: "16:9", ratio: 16 / 9 },
+    { value: "9:16", ratio: 9 / 16 },
+    { value: "1:1", ratio: 1 },
+    { value: "4:5", ratio: 4 / 5 },
+    { value: "3:4", ratio: 3 / 4 },
+    { value: "4:3", ratio: 4 / 3 },
+    { value: "21:9", ratio: 21 / 9 },
+  ];
+  return candidates.sort((a, b) => Math.abs(a.ratio - ratio) - Math.abs(b.ratio - ratio))[0]?.value || "16:9";
+}
+
+function resolutionFromProfile(profile: NomiRenderManifestV1["profile"]): TimelineMp4ExportRequest["resolution"] {
+  return Math.max(profile.width, profile.height) <= 1280 ? "720p" : "1080p";
+}
+
+export async function writeExportTempInput(payload: unknown): Promise<{ ok: true; size: number }> {
+  const raw = (payload || {}) as ExportTempInputRequest;
+  const job = requireWritableExportJob(raw.jobId);
+  const result = appendExportTempInputChunk(job, raw.chunk as never);
+  exportJobManager.updateJob(job.id, {
+    status: job.status === "queued" ? "preparing" : job.status,
+    progress: { ratio: Math.max(job.progress.ratio, 0.08), stage: job.status === "queued" ? "preparing" : job.status, message: "Receiving WebM input" },
+  });
+  return result;
+}
+
+export async function finishExportTempInput(payload: unknown): Promise<unknown> {
+  const raw = (payload || {}) as ExportTempInputRequest;
+  const job = requireWritableExportJob(raw.jobId);
+  const controller = new AbortController();
+  activeExportAbortControllers.set(job.id, controller);
+  try {
+    const { inputPath } = finishExportTempInputFile(job);
+    const profile = job.manifest.profile;
+    const durationMs = Math.max(0, (job.manifest.timeline.durationFrames / Math.max(1, job.manifest.timeline.fps)) * 1000);
+    const stderrLogPath = path.join(job.jobDir, "ffmpeg.log");
+    exportJobManager.updateJob(job.id, {
+      status: "encoding",
+      progress: { ratio: Math.max(job.progress.ratio, 0.12), stage: "encoding", message: "Encoding MP4" },
+    });
+    const result = await transcodeWebmFileToMp4({
+      jobId: job.id,
+      projectDir: job.projectDir,
+      inputPath,
+      outputName: job.outputName || "nomi-export",
+      resolution: resolutionFromProfile(profile),
+      aspectRatio: aspectRatioFromProfile(profile),
+      quality: profile.quality || "standard",
+      fps: profile.fps || job.manifest.timeline.fps || 30,
+      durationMs,
+      signal: controller.signal,
+      stderrLogPath,
+      onProgress: (progress) => {
+        const current = exportJobManager.getJob(job.id);
+        if (!current || current.cancelled) return;
+        exportJobManager.updateJob(job.id, {
+          status: "encoding",
+          progress: {
+            ratio: Math.max(current.progress.ratio, 0.12 + progress.ratio * 0.84),
+            stage: "encoding",
+            message: progress.message || "Encoding MP4",
+          },
+        });
+      },
+    });
+    if (controller.signal.aborted || exportJobManager.getJob(job.id)?.cancelled) {
+      throw new ExportCancelledError();
+    }
+    exportJobManager.updateJob(job.id, {
+      status: "finalizing",
+      progress: { ratio: 0.98, stage: "finalizing", message: "Finalizing MP4" },
+    });
+    exportJobManager.completeJob(job.id, {
+      outputPath: result.absolutePath,
+      relativeOutputPath: result.relativePath,
+      bytes: result.size,
+      durationMs,
+    });
+    return result;
+  } catch (error) {
+    if (error instanceof ExportCancelledError || exportJobManager.getJob(job.id)?.cancelled) {
+      await exportJobManager.cancelJob(job.id);
+    } else {
+      exportJobManager.failJob(job.id, error);
+    }
+    throw error;
+  } finally {
+    activeExportAbortControllers.delete(job.id);
+    removeExportTempInput(job);
+  }
+}
+
+export function subscribeExportJobEvents(listener: (event: ExportJobEvent) => void): () => void {
+  return exportJobManager.onEvent(listener);
+}
+
+export async function startTimelineMp4Export(payload: unknown): Promise<unknown> {
+  const raw = (payload || {}) as TimelineMp4ExportRequest;
+  const projectId = String(raw.projectId || "").trim();
+  if (!projectId) throw new Error("导出失败：缺少项目 ID");
+  const projectDir = projectDirById(projectId);
+  if (!projectDir) throw new Error("导出失败：Project not found");
+  ensureProjectFolders(projectDir);
+  return transcodeWebmToMp4({
+    projectDir,
+    inputBytes: bufferFromExportBytes(raw.webmBytes),
+    outputName: raw.outputName || "nomi-export",
+    resolution: raw.resolution || "1080p",
+    aspectRatio: raw.aspectRatio || "16:9",
+    quality: raw.quality || "standard",
+    fps: raw.fps || 30,
+  });
+}
+
+export function showExportInFolder(payload: unknown): { ok: true } {
+  const raw = (payload || {}) as ShowExportInFolderRequest;
+  const projectId = String(raw.projectId || "").trim();
+  const relativePath = String(raw.relativePath || "").trim();
+  if (!projectId) throw new Error("打开导出位置失败：缺少项目 ID");
+  if (!relativePath) throw new Error("打开导出位置失败：缺少导出文件路径");
+  let normalized: string;
+  try {
+    normalized = assertProjectExportRelativePath(relativePath);
+  } catch {
+    throw new Error("打开导出位置失败：只能打开当前项目 exports 文件夹内的文件");
+  }
+  const resolved = resolveProjectRelativePath(projectId, normalized);
+  if (!fs.existsSync(resolved)) throw new Error("打开导出位置失败：导出文件不存在");
+  // Lazy require keeps runtime.ts usable in tests that do not initialize Electron shell.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { shell } = require("electron") as typeof import("electron");
+  shell.showItemInFolder(resolved);
+  return { ok: true };
 }
 
 function catalogPath(): string {
@@ -442,55 +877,12 @@ function catalogPath(): string {
 }
 
 function defaultCatalog(): CatalogState {
-  const t = nowIso();
+  // v0.8: empty catalog. Fresh users add their own models via the Wizard.
+  // No more phantom seed entries (chatfire/sora/gpt-4o-mini) that have no keys.
   return {
-    version: 1,
-    vendors: [
-      {
-        key: "chatfire",
-        name: "ChatFire OpenAI Compatible",
-        enabled: true,
-        hasApiKey: false,
-        baseUrlHint: "https://api.chatfire.site",
-        authType: "bearer",
-        authHeader: null,
-        authQueryParam: null,
-        createdAt: t,
-        updatedAt: t,
-      },
-    ],
-    models: [
-      {
-        modelKey: "gpt-image-1",
-        vendorKey: "chatfire",
-        modelAlias: "gpt-image-1",
-        labelZh: "GPT Image",
-        kind: "image",
-        enabled: true,
-        createdAt: t,
-        updatedAt: t,
-      },
-      {
-        modelKey: "sora",
-        vendorKey: "chatfire",
-        modelAlias: "sora",
-        labelZh: "Sora Video",
-        kind: "video",
-        enabled: true,
-        createdAt: t,
-        updatedAt: t,
-      },
-      {
-        modelKey: "gpt-4o-mini",
-        vendorKey: "chatfire",
-        modelAlias: "gpt-4o-mini",
-        labelZh: "GPT-4o mini",
-        kind: "text",
-        enabled: true,
-        createdAt: t,
-        updatedAt: t,
-      },
-    ],
+    version: CURRENT_CATALOG_VERSION,
+    vendors: [],
+    models: [],
     mappings: [],
     apiKeysByVendor: {},
   };
@@ -498,20 +890,169 @@ function defaultCatalog(): CatalogState {
 
 function readCatalog(): CatalogState {
   const parsed = readJson<CatalogState | null>(catalogPath(), null);
-  if (!parsed || parsed.version !== 1) {
+  if (!parsed) {
     const initial = defaultCatalog();
     writeCatalog(initial);
     return initial;
   }
-  const apiKeysByVendor = parsed.apiKeysByVendor || {};
+
+  // Migrate forward. v1 → v2: tag pre-existing keys as plaintext-encoded; M5.2
+  // will lazy-upgrade them to safeStorage on first read once that lands.
+  const migrated = migrateCatalogForward(parsed);
+
+  const apiKeysByVendor = migrated.apiKeysByVendor || {};
   return {
-    ...parsed,
-    vendors: parsed.vendors.map((vendor) => ({
+    ...migrated,
+    vendors: migrated.vendors.map((vendor) => ({
       ...vendor,
+      providerKind: normalizeProviderKind(vendor.providerKind),
       hasApiKey: Boolean(apiKeysByVendor[vendor.key]?.apiKey && apiKeysByVendor[vendor.key]?.enabled !== false),
     })),
     apiKeysByVendor,
   };
+}
+
+/**
+ * Convert one legacy mapping payload into a `{create, query}` pair, handling:
+ *  - bare op: `{method, path, headers, body}` → treat as create
+ *  - v2 envelope: `{version: "v2", create: {default: op}, query: {default: op}}`
+ *    → unwrap both stages
+ * Returns whatever is recognizable; the caller merges across rows.
+ */
+function extractLegacyStages(raw: unknown): { create?: HttpOperation; query?: HttpOperation; statusMapping?: Record<string, string[]> } {
+  if (!isJsonRecord(raw)) return {};
+  const out: { create?: HttpOperation; query?: HttpOperation; statusMapping?: Record<string, string[]> } = {};
+  const opFrom = (v: unknown): HttpOperation | undefined => {
+    if (!isJsonRecord(v)) return undefined;
+    const inner = isJsonRecord(v.default) ? v.default : v;
+    if (typeof inner.method === "string" && typeof inner.path === "string") return inner as unknown as HttpOperation;
+    return undefined;
+  };
+  // Bare op first — a legacy {method, path, headers, body, query} row has its
+  // own `query` field (HTTP query params), so envelope detection by the
+  // presence of `raw.query` is wrong. Only unwrap an envelope when the marker
+  // `version === "v2"` is present or `raw.create` is itself an op.
+  if (typeof raw.method === "string" && typeof raw.path === "string") {
+    out.create = raw as unknown as HttpOperation;
+  } else if (raw.version === "v2" || opFrom(raw.create) || opFrom(raw.query)) {
+    const c = opFrom(raw.create);
+    const q = opFrom(raw.query);
+    if (c) out.create = c;
+    if (q) out.query = q;
+    if (isJsonRecord(raw.status_mapping)) out.statusMapping = raw.status_mapping as Record<string, string[]>;
+  }
+  return out;
+}
+
+function normalizeLegacyMappings(rawMappings: unknown): Mapping[] {
+  const list = Array.isArray(rawMappings) ? rawMappings : [];
+  const grouped = new Map<string, Mapping>();
+  for (const item of list) {
+    if (!isJsonRecord(item)) continue;
+    const vendorKey = String(item.vendorKey || "").trim();
+    const taskKind = (item.taskKind as ProfileKind) || "chat";
+    if (!vendorKey) continue;
+    const key = `${vendorKey}|${taskKind}`;
+    const existing = grouped.get(key);
+    const name = String(item.name || "");
+    const isQueryRow = /\bquery\b/i.test(name);
+    const fromRequest = extractLegacyStages(item.requestMapping);
+    const fromResponse = extractLegacyStages(item.responseMapping);
+    // If the row's name says "query" but the legacy op landed in `create`,
+    // promote it to `query` — those old rows stored a single op regardless of stage.
+    const stages: { create?: HttpOperation; query?: HttpOperation; statusMapping?: Record<string, string[]> } = {};
+    for (const stage of [fromRequest, fromResponse]) {
+      if (stage.create && isQueryRow && !stage.query) {
+        stages.query = stages.query || stage.create;
+      } else {
+        if (stage.create) stages.create = stages.create || stage.create;
+        if (stage.query) stages.query = stages.query || stage.query;
+      }
+      if (stage.statusMapping) stages.statusMapping = { ...(stages.statusMapping || {}), ...stage.statusMapping };
+    }
+    const baseName = name.replace(/\s*\((create|query)\)\s*$/i, "").trim() || taskKind;
+    const id = String(item.id || "").trim() || `mapping-${crypto.randomUUID()}`;
+    const createdAt = String(item.createdAt || nowIso());
+    if (!existing) {
+      if (!stages.create && !stages.query) continue; // unsalvageable
+      grouped.set(key, {
+        id,
+        vendorKey,
+        taskKind,
+        name: baseName,
+        enabled: normalizeEnabled(item.enabled, true),
+        create: stages.create || (stages.query as HttpOperation), // create is required; fall back if only query was salvageable
+        ...(stages.query ? { query: stages.query } : {}),
+        ...(stages.statusMapping ? { statusMapping: stages.statusMapping } : {}),
+        createdAt,
+        updatedAt: nowIso(),
+      });
+    } else {
+      // Merge: keep first row's create, fill in query from any later row.
+      if (!existing.query && stages.query) existing.query = stages.query;
+      if (!existing.query && stages.create && isQueryRow) existing.query = stages.create;
+      if (stages.statusMapping) existing.statusMapping = { ...(existing.statusMapping || {}), ...stages.statusMapping };
+      existing.updatedAt = nowIso();
+    }
+  }
+  return Array.from(grouped.values());
+}
+
+/**
+ * In-place forward migration. Unknown future versions fall back to defaults.
+ * Always returns a state at CURRENT_CATALOG_VERSION.
+ */
+function migrateCatalogForward(state: CatalogState): CatalogState {
+  let s = state;
+
+  if (!s.version || (s.version as number) < 1) {
+    // Garbled state — fall back to defaults rather than risk corruption.
+    return defaultCatalog();
+  }
+
+  if (s.version === 1) {
+    // v1 → v2: tag every existing API key as plaintext so M5.2 knows what to upgrade.
+    const apiKeysByVendor: Record<string, ApiKeyRecord> = {};
+    for (const [k, rec] of Object.entries(s.apiKeysByVendor || {})) {
+      apiKeysByVendor[k] = { ...rec, enc: rec.enc || "plain" };
+    }
+    s = { ...s, version: 2, apiKeysByVendor };
+    writeCatalog(s);
+  }
+
+  if (s.version === 2) {
+    // v2 → v3: collapse legacy {requestMapping,responseMapping} into flat
+    // {create,query}. Handles three legacy shapes — bare op, v2 envelope, and
+    // split create/query rows — and dedupes by (vendorKey, taskKind).
+    s = { ...s, version: 3, mappings: normalizeLegacyMappings(s.mappings) };
+    writeCatalog(s);
+  }
+
+  if ((s.version as number) > CURRENT_CATALOG_VERSION) {
+    // Newer file than this app understands — keep going read-only, but don't downgrade.
+    console.warn(`[catalog] file version ${s.version} > app version ${CURRENT_CATALOG_VERSION}; reading as-is`);
+  }
+
+  // Lazy upgrade: any plaintext keys get re-encrypted on first read once safeStorage is up.
+  // This handles both legacy v1 keys post-migration and import-from-export scenarios.
+  if (isSafeStorageAvailable()) {
+    let dirty = false;
+    const upgraded: Record<string, ApiKeyRecord> = {};
+    for (const [k, rec] of Object.entries(s.apiKeysByVendor || {})) {
+      if (rec.enc !== "safeStorage" && rec.apiKey) {
+        upgraded[k] = makeApiKeyRecordFromPlain(rec.apiKey, rec.vendorKey, rec.enabled, rec.createdAt, rec.updatedAt);
+        dirty = true;
+      } else {
+        upgraded[k] = rec;
+      }
+    }
+    if (dirty) {
+      s = { ...s, apiKeysByVendor: upgraded };
+      writeCatalog(s);
+    }
+  }
+
+  return s;
 }
 
 function writeCatalog(state: CatalogState): CatalogState {
@@ -519,8 +1060,58 @@ function writeCatalog(state: CatalogState): CatalogState {
   return state;
 }
 
+// =================================================================
+// API key encryption (M5.2)
+//
+// safeStorage uses OS keychain (macOS Keychain, Windows DPAPI, libsecret on Linux).
+// When unavailable (e.g. rootless Linux without keyring), we fall back to plaintext
+// and tag the record so a future read can lazy-upgrade.
+// =================================================================
+
+let __safeStorageAvailableCached: boolean | null = null;
+function isSafeStorageAvailable(): boolean {
+  if (__safeStorageAvailableCached !== null) return __safeStorageAvailableCached;
+  try {
+    __safeStorageAvailableCached = safeStorage.isEncryptionAvailable();
+  } catch {
+    __safeStorageAvailableCached = false;
+  }
+  if (!__safeStorageAvailableCached) {
+    console.warn("[catalog] safeStorage unavailable; API keys will be stored as plaintext");
+  }
+  return __safeStorageAvailableCached;
+}
+
+/** Build a fresh ApiKeyRecord from plaintext, encrypting if safeStorage is available. */
+function makeApiKeyRecordFromPlain(plain: string, vendorKey: string, enabled: boolean, createdAt: string, updatedAt: string): ApiKeyRecord {
+  if (isSafeStorageAvailable()) {
+    const encrypted = safeStorage.encryptString(plain).toString("base64");
+    return { vendorKey, apiKey: encrypted, enc: "safeStorage", enabled, createdAt, updatedAt };
+  }
+  return { vendorKey, apiKey: plain, enc: "plain", enabled, createdAt, updatedAt };
+}
+
+/** Decode an ApiKeyRecord to plaintext. Throws if a safeStorage-encoded value can't be decrypted. */
+function decryptApiKeyRecord(rec: ApiKeyRecord | undefined): string {
+  if (!rec || !rec.apiKey) return "";
+  if (rec.enc === "safeStorage") {
+    try {
+      return safeStorage.decryptString(Buffer.from(rec.apiKey, "base64"));
+    } catch (e) {
+      console.error(`[catalog] failed to decrypt API key for vendor ${rec.vendorKey}: ${e instanceof Error ? e.message : e}`);
+      return "";
+    }
+  }
+  // enc === "plain" or absent (legacy v1)
+  return rec.apiKey;
+}
+
 function normalizeEnabled(value: unknown, fallback = true): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function normalizeProviderKind(value: unknown, fallback: AiSdkProviderKind = "openai-compatible"): AiSdkProviderKind {
+  return value === "anthropic" || value === "openai-compatible" ? value : fallback;
 }
 
 function filterByParams<T extends { vendorKey?: string; kind?: BillingModelKind; enabled?: boolean; taskKind?: ProfileKind }>(
@@ -550,6 +1141,35 @@ export function listModelCatalogMappings(params?: unknown): Mapping[] {
   return filterByParams(readCatalog().mappings, params);
 }
 
+/**
+ * Resolve the onboarding doc-reader LLM from a configured **text** model in the
+ * catalog — i.e. the model the user already added (e.g. dm-fox GPT-5.5). This is
+ * the product source of truth: it works identically in dev and a packaged app,
+ * with no env vars / no `.secrets`. The key is decrypted here in main and never
+ * leaves the process. Returns null when no usable text model is configured (the
+ * caller then surfaces a "add a text model first" message). Bearer/none-auth
+ * vendors only — query/x-api-key auth isn't a chat-completions shape.
+ */
+export function resolveOnboardingAgentFromCatalog():
+  | { providerKind: AiSdkProviderKind; baseUrl: string; modelId: string; apiKey: string }
+  | null {
+  const state = readCatalog();
+  for (const model of state.models) {
+    if (model.kind !== "text" || !model.enabled) continue;
+    const vendor = state.vendors.find((v) => v.key === model.vendorKey && v.enabled);
+    if (!vendor || !vendor.baseUrlHint) continue;
+    const apiKey = decryptApiKeyRecord(state.apiKeysByVendor[vendor.key]);
+    if (!apiKey) continue;
+    return {
+      providerKind: normalizeProviderKind(vendor.providerKind),
+      baseUrl: vendor.baseUrlHint,
+      modelId: model.modelKey,
+      apiKey,
+    };
+  }
+  return null;
+}
+
 export function getModelCatalogHealth(): unknown {
   const state = readCatalog();
   const enabledVendors = state.vendors.filter((vendor) => vendor.enabled);
@@ -560,7 +1180,7 @@ export function getModelCatalogHealth(): unknown {
     const apiKey = state.apiKeysByVendor[model.vendorKey];
     return Boolean(vendor?.enabled && (vendor.authType === "none" || (apiKey?.enabled && apiKey.apiKey)));
   });
-  const byKind = (["text", "image", "video"] as BillingModelKind[]).map((kind) => ({
+  const byKind = (["text", "image", "video", "audio"] as BillingModelKind[]).map((kind) => ({
     kind,
     enabledModels: enabledModels.filter((model) => model.kind === kind).length,
     executableModels: executableModels.filter((model) => model.kind === kind).length,
@@ -610,6 +1230,7 @@ export function upsertModelCatalogVendor(payload: unknown): Vendor {
     authType: (raw.authType as Vendor["authType"]) || existing?.authType || "bearer",
     authHeader: typeof raw.authHeader === "string" ? raw.authHeader.trim() || null : existing?.authHeader ?? null,
     authQueryParam: typeof raw.authQueryParam === "string" ? raw.authQueryParam.trim() || null : existing?.authQueryParam ?? null,
+    providerKind: normalizeProviderKind(raw.providerKind, existing?.providerKind ?? "openai-compatible"),
     meta: raw.meta ?? existing?.meta,
     createdAt: existing?.createdAt || t,
     updatedAt: t,
@@ -636,13 +1257,13 @@ export function upsertModelCatalogVendorApiKey(vendorKey: string, payload: unkno
   if (!apiKey) throw new Error("api key is required");
   const t = nowIso();
   const existing = state.apiKeysByVendor[key];
-  state.apiKeysByVendor[key] = {
-    vendorKey: key,
+  state.apiKeysByVendor[key] = makeApiKeyRecordFromPlain(
     apiKey,
-    enabled: normalizeEnabled((payload as JsonRecord)?.enabled, true),
-    createdAt: existing?.createdAt || t,
-    updatedAt: t,
-  };
+    key,
+    normalizeEnabled((payload as JsonRecord)?.enabled, true),
+    existing?.createdAt || t,
+    t,
+  );
   writeCatalog(state);
   return { vendorKey: key, hasApiKey: true, enabled: state.apiKeysByVendor[key].enabled, createdAt: state.apiKeysByVendor[key].createdAt, updatedAt: t };
 }
@@ -654,6 +1275,133 @@ export function clearModelCatalogVendorApiKey(vendorKey: string): unknown {
   delete state.apiKeysByVendor[key];
   writeCatalog(state);
   return { vendorKey: key, hasApiKey: false, enabled: false, createdAt: t, updatedAt: t };
+}
+
+/**
+ * Commit a successful onboarding trial into the local catalog as a real entry:
+ * vendor + encrypted apiKey + model (with evidence) + create/query mappings.
+ *
+ * Designed to be called from the renderer once a TrialOutcome arrives with
+ * status === "success". Returns the persisted Model so the caller can light up
+ * the success UI.
+ */
+export function commitOnboardedModelToCatalog(payload: {
+  outcome: unknown;
+  userApiKey: string;
+  /** Optional display label override; otherwise we use draft.modelDisplayName. */
+  displayLabel?: string;
+}): Model {
+  const outcome = payload?.outcome as JsonRecord | null;
+  if (!outcome || typeof outcome !== "object") throw new Error("outcome required");
+  const draft = (outcome as JsonRecord).draft as JsonRecord | null;
+  if (!draft) throw new Error("outcome.draft missing");
+
+  const vendorKey = String(draft.vendorKey || "").trim();
+  const vendorName = String(draft.vendorName || vendorKey).trim();
+  const vendorBaseUrl = String(draft.vendorBaseUrl || "").trim();
+  const modelKey = String(draft.modelKey || "").trim();
+  const modelDisplayName = String(payload.displayLabel || draft.modelDisplayName || modelKey).trim();
+  const targetKind = String(draft.targetKind || "").trim();
+  const userApiKey = String(payload.userApiKey || "").trim();
+
+  if (!vendorKey || !vendorBaseUrl || !modelKey) {
+    throw new Error("incomplete draft: vendorKey + vendorBaseUrl + modelKey are required");
+  }
+  if (!userApiKey) throw new Error("userApiKey required to commit a model");
+
+  let billingKind: BillingModelKind;
+  let taskKind: ProfileKind;
+  if (targetKind === "text") { billingKind = "text"; taskKind = "chat"; }
+  else if (targetKind === "image") { billingKind = "image"; taskKind = "text_to_image"; }
+  else if (targetKind === "video") { billingKind = "video"; taskKind = "text_to_video"; }
+  else if (targetKind === "audio") { billingKind = "audio"; taskKind = "text_to_audio"; }
+  else throw new Error(`Unsupported model kind '${targetKind}'`);
+
+  const auth = (draft.vendorAuth || {}) as JsonRecord;
+  const authType = (auth.type as Vendor["authType"]) || "bearer";
+
+  // 1. vendor
+  upsertModelCatalogVendor({
+    key: vendorKey,
+    name: vendorName,
+    baseUrlHint: vendorBaseUrl,
+    authType,
+    authHeader: auth.headerName || null,
+    authQueryParam: auth.queryParam || null,
+    providerKind: draft.vendorProviderKind || "openai-compatible",
+    enabled: true,
+  });
+
+  // 2. apiKey (auto-encrypted by upsert)
+  upsertModelCatalogVendorApiKey(vendorKey, { apiKey: userApiKey, enabled: true });
+
+  // 3. model + onboarding evidence snapshot
+  type OnboardingField = NonNullable<Model["onboarding"]>["fields"][number];
+  const onboardingFields: OnboardingField[] = Array.isArray(draft.modelFields)
+    ? (draft.modelFields as JsonRecord[]).map((f) => ({
+        key: String(f.key),
+        displayName: String(f.displayName),
+        type: f.type as OnboardingField["type"],
+        ...(f.options ? { options: f.options as OnboardingField["options"] } : {}),
+        ...(f.default !== undefined ? { default: String(f.default) } : {}),
+        evidence: f.evidence as OnboardingField["evidence"],
+      }))
+    : [];
+
+  // Project the agent-detected fields into model.meta.parameters so the node UI
+  // can render them. The UI reads parameters/upload-slots exclusively from
+  // model.meta (parseModelParameterControls); onboarding.fields is only an
+  // evidence snapshot. Without this projection the model lands in the catalog
+  // but shows zero parameters and no image-url upload slots on the node.
+  // The shape parseParameterControl expects: { key, label, type, options, default }.
+  const metaParameters = onboardingFields.map((f) => ({
+    key: f.key,
+    label: f.displayName || f.key,
+    type: f.type,
+    ...(f.options ? { options: f.options } : {}),
+    ...(f.default !== undefined ? { default: f.default } : {}),
+  }));
+
+  const model = upsertModelCatalogModel({
+    modelKey,
+    vendorKey,
+    modelAlias: modelKey,
+    labelZh: modelDisplayName,
+    kind: billingKind,
+    enabled: true,
+    meta: { parameters: metaParameters },
+    onboarding: {
+      addedVia: "agent",
+      trialId: String(outcome.trialId || ""),
+      docsUrl: String(outcome.docsUrl || ""),
+      addedAt: nowIso(),
+      fields: onboardingFields,
+    },
+  });
+
+  // 4. mapping: one row per (vendor, taskKind), carrying both stages.
+  const mappingCreate = draft.mappingCreate as HttpOperation | undefined;
+  const mappingQuery = draft.mappingQuery as HttpOperation | undefined;
+  if (mappingCreate) {
+    // Reconcile: the agent only templatizes params it saw in the curl example,
+    // so spec-derived params (resolution, duration, ...) the user can now select
+    // on the node have no {{request.params.*}} slot in the body and would send
+    // nothing. Inject the missing field keys at the param nesting level.
+    const reconciledCreate: HttpOperation =
+      mappingCreate.body !== undefined && onboardingFields.length > 0
+        ? { ...mappingCreate, body: mergeMissingParamsIntoBody(mappingCreate.body, onboardingFields.map((f) => f.key)) }
+        : mappingCreate;
+    upsertModelCatalogMapping({
+      vendorKey,
+      taskKind,
+      name: modelDisplayName,
+      enabled: true,
+      create: reconciledCreate,
+      ...(mappingQuery ? { query: mappingQuery } : {}),
+    });
+  }
+
+  return model;
 }
 
 export function upsertModelCatalogModel(payload: unknown): Model {
@@ -673,6 +1421,7 @@ export function upsertModelCatalogModel(payload: unknown): Model {
     enabled: normalizeEnabled(raw.enabled, existing?.enabled ?? true),
     meta: raw.meta ?? existing?.meta,
     pricing: raw.pricing as Model["pricing"] || existing?.pricing,
+    onboarding: (raw.onboarding as Model["onboarding"]) ?? existing?.onboarding,
     createdAt: existing?.createdAt || t,
     updatedAt: t,
   };
@@ -690,20 +1439,35 @@ export function deleteModelCatalogModel(vendorKey: string, modelKey: string): vo
 export function upsertModelCatalogMapping(payload: unknown): Mapping {
   const state = readCatalog();
   const raw = payload as JsonRecord;
-  const id = String(raw.id || "").trim() || `mapping-${crypto.randomUUID()}`;
-  const existing = state.mappings.find((mapping) => mapping.id === id);
-  const t = nowIso();
-  const vendorKey = String(raw.vendorKey || existing?.vendorKey || "").trim();
-  const taskKind = (raw.taskKind as ProfileKind) || existing?.taskKind || "chat";
+  const vendorKey = String(raw.vendorKey || "").trim();
+  const taskKind = (raw.taskKind as ProfileKind) || "chat";
   if (!vendorKey) throw new Error("vendorKey is required");
+  // One mapping per (vendor, taskKind). If id is supplied and matches, update
+  // that row; otherwise locate by (vendor, taskKind) so callers can upsert
+  // without tracking ids.
+  const existing = state.mappings.find((m) =>
+    raw.id ? m.id === raw.id : m.vendorKey === vendorKey && m.taskKind === taskKind,
+  );
+  const id = String(raw.id || existing?.id || `mapping-${crypto.randomUUID()}`);
+  const t = nowIso();
+  // Accept new shape (create/query) directly, or legacy {requestMapping,...}
+  // (e.g. via the unchanged import path) and normalize on the way in.
+  const legacy = extractLegacyStages(raw.requestMapping ?? raw.requestProfile);
+  const legacyResp = extractLegacyStages(raw.responseMapping);
+  const create = (raw.create as HttpOperation | undefined) || legacy.create || legacyResp.create || existing?.create;
+  const query = (raw.query as HttpOperation | undefined) || legacy.query || legacyResp.query || existing?.query;
+  if (!create) throw new Error("create operation is required (method + path)");
   const mapping: Mapping = {
     id,
     vendorKey,
     taskKind,
     name: String(raw.name || existing?.name || taskKind).trim(),
     enabled: normalizeEnabled(raw.enabled, existing?.enabled ?? true),
-    requestMapping: raw.requestMapping ?? raw.requestProfile ?? existing?.requestMapping,
-    responseMapping: raw.responseMapping ?? raw.requestProfile ?? existing?.responseMapping,
+    create,
+    ...(query ? { query } : {}),
+    ...(raw.statusMapping || legacy.statusMapping || existing?.statusMapping
+      ? { statusMapping: (raw.statusMapping as Record<string, string[]>) || legacy.statusMapping || existing?.statusMapping }
+      : {}),
     createdAt: existing?.createdAt || t,
     updatedAt: t,
   };
@@ -726,8 +1490,9 @@ export function exportModelCatalogPackage(params?: unknown): unknown {
     exportedAt: nowIso(),
     vendors: state.vendors.map((vendor) => ({
       vendor,
+      // Export carries plaintext keys for portability; re-import will re-encrypt on the target machine.
       ...(includeApiKeys && state.apiKeysByVendor[vendor.key]?.apiKey
-        ? { apiKey: { apiKey: state.apiKeysByVendor[vendor.key].apiKey, enabled: state.apiKeysByVendor[vendor.key].enabled } }
+        ? { apiKey: { apiKey: decryptApiKeyRecord(state.apiKeysByVendor[vendor.key]), enabled: state.apiKeysByVendor[vendor.key].enabled } }
         : {}),
       models: state.models.filter((model) => model.vendorKey === vendor.key),
       mappings: state.mappings.filter((mapping) => mapping.vendorKey === vendor.key),
@@ -767,16 +1532,20 @@ export function importModelCatalogPackage(payload: unknown): unknown {
 export async function fetchModelCatalogDocs(payload: unknown): Promise<unknown> {
   const targetUrl = String((payload as JsonRecord)?.url || "").trim();
   if (!/^https?:\/\//i.test(targetUrl)) throw new Error("http/https url is required");
-  const response = await fetch(targetUrl);
-  const contentType = response.headers.get("content-type") || "";
-  const html = await response.text();
+  // v0.7.6: hardenedFetch — 拦私网 + 超时 + 限制大小
+  const fetched = await hardenedFetchText(targetUrl, {
+    timeoutMs: 15_000,
+    maxBytes: 5 * 1024 * 1024, // 文档抓取 5MB 上限够用
+  });
+  const html = fetched.text;
+  const contentType = fetched.contentType;
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || null;
   const text = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   const max = 120000;
   return {
     url: targetUrl,
-    finalUrl: response.url,
-    status: response.status,
+    finalUrl: fetched.finalUrl,
+    status: fetched.status,
     contentType,
     title,
     text: text.slice(0, max),
@@ -800,21 +1569,8 @@ export async function testModelCatalogMapping(id: string, payload: unknown): Pro
       request: null,
     };
   }
-  const profile = requestProfileFromMapping(mapping);
-  if (!profile) {
-    return {
-      mappingId: id,
-      vendorKey: mapping.vendorKey,
-      taskKind: mapping.taskKind,
-      stage: raw?.stage || "create",
-      executed: false,
-      ok: false,
-      diagnostics: ["Only requestProfile.version=v2 can be tested in the desktop runtime."],
-      request: null,
-    };
-  }
   const stage = raw?.stage === "result" || raw?.stage === "query" ? "query" : "create";
-  const operation = profileOperation(profile, stage);
+  const operation: HttpOperation | undefined = stage === "create" ? mapping.create : mapping.query;
   if (!operation) {
     return {
       mappingId: id,
@@ -823,7 +1579,7 @@ export async function testModelCatalogMapping(id: string, payload: unknown): Pro
       stage,
       executed: false,
       ok: false,
-      diagnostics: [`No ${stage}.default operation in requestProfile.`],
+      diagnostics: [`Mapping has no ${stage} stage.`],
       request: null,
     };
   }
@@ -847,7 +1603,7 @@ export async function testModelCatalogMapping(id: string, payload: unknown): Pro
   if (typeof upstreamResponse !== "undefined") {
     const normalized = await buildProfileTaskResult({
       response: upstreamResponse,
-      profile,
+      mapping,
       operation,
       request,
       taskIdFallback: firstString(raw?.taskId, `test-${Date.now()}`),
@@ -873,14 +1629,14 @@ export async function testModelCatalogMapping(id: string, payload: unknown): Pro
       stage,
       executed: false,
       ok: true,
-      diagnostics: ["Rendered local desktop requestProfile without sending a request."],
+      diagnostics: ["Rendered local desktop mapping without sending a request."],
       request: preview,
     };
   }
   const executed = await executeProfileOperation({ vendor, model, apiKey, request, operation, providerMeta });
   const normalized = await buildProfileTaskResult({
     response: executed.response,
-    profile,
+    mapping,
     operation,
     request,
     taskIdFallback: firstString(raw?.taskId, `test-${Date.now()}`),
@@ -893,7 +1649,7 @@ export async function testModelCatalogMapping(id: string, payload: unknown): Pro
     stage,
     executed: true,
     ok: normalized.result.status !== "failed",
-    diagnostics: ["Executed requestProfile through the desktop runtime."],
+    diagnostics: ["Executed mapping through the desktop runtime."],
     request: executed.request,
     response: normalized.result,
   };
@@ -964,11 +1720,16 @@ function collectFilesRecursively(dir: string): string[] {
   return files;
 }
 
-function uniqueAssetPath(projectId: string, fileName: string): { absolutePath: string; relativePath: string } {
+function assetBucketFromMeta(meta: JsonRecord): "generated" | "imported" {
+  const kind = String(meta.kind || "").toLowerCase();
+  return kind === "upload" || kind === "imported" || kind === "local" ? "imported" : "generated";
+}
+
+function uniqueAssetPath(projectId: string, fileName: string, bucket: "generated" | "imported" = "generated"): { absolutePath: string; relativePath: string } {
   const projectDir = projectDirById(projectId);
   if (!projectDir) throw new Error("Project not found");
   const today = new Date().toISOString().slice(0, 10);
-  const assetDir = path.join(projectDir, "assets", today);
+  const assetDir = path.join(projectDir, "assets", bucket, today);
   ensureDir(assetDir);
   const parsed = path.parse(sanitizeName(fileName, "asset.bin"));
   const base = parsed.name || "asset";
@@ -984,7 +1745,7 @@ function uniqueAssetPath(projectId: string, fileName: string): { absolutePath: s
 }
 
 function writeAsset(projectId: string, bytes: Buffer, fileName: string, contentType: string, meta: JsonRecord): unknown {
-  const { absolutePath, relativePath } = uniqueAssetPath(projectId, fileName);
+  const { absolutePath, relativePath } = uniqueAssetPath(projectId, fileName, assetBucketFromMeta(meta));
   fs.writeFileSync(absolutePath, bytes);
   const url = localAssetUrl(projectId, relativePath);
   const t = nowIso();
@@ -1030,10 +1791,14 @@ export async function importRemoteAsset(payload: unknown): Promise<unknown> {
     return writeAsset(projectId, parsed.bytes, String(raw.fileName || `asset-${Date.now()}.${ext}`), parsed.contentType, { kind: raw.kind || "generated", originalUrl: null });
   }
   if (!/^https?:\/\//i.test(url)) throw new Error("Only http(s), data, and nomi-local assets are supported");
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Asset download failed: ${response.status}`);
-  const contentType = response.headers.get("content-type") || "application/octet-stream";
-  const bytes = Buffer.from(await response.arrayBuffer());
+  // v0.7.6: hardenedFetch — 资产下载需要更大上限（视频/图片），但仍拦私网 + 超时
+  const fetched = await hardenedFetch(url, {
+    timeoutMs: 60_000,
+    maxBytes: 200 * 1024 * 1024, // 200MB 资产上限
+    allowContentTypes: ["image/", "video/", "audio/", "application/octet-stream"],
+  });
+  const contentType = fetched.contentType || "application/octet-stream";
+  const bytes = fetched.bytes;
   const ext = extensionFromMime(contentType, extensionFromUrl(url));
   const fileName = String(raw.fileName || path.basename(new URL(url).pathname) || `asset-${Date.now()}.${ext}`);
   return writeAsset(projectId, bytes, fileName.includes(".") ? fileName : `${fileName}.${ext}`, contentType, {
@@ -1122,7 +1887,7 @@ function findExecutableModel(vendorKey: string, modelKey: string, kind?: Billing
   if (!vendor) throw new Error(`Vendor is not enabled: ${vendorKey}`);
   const model = state.models.find((item) => item.vendorKey === vendorKey && item.enabled && (!kind || item.kind === kind) && (item.modelKey === modelKey || item.modelAlias === modelKey));
   if (!model) throw new Error(`Model is not enabled: ${modelKey}`);
-  const apiKey = state.apiKeysByVendor[vendorKey]?.apiKey || "";
+  const apiKey = decryptApiKeyRecord(state.apiKeysByVendor[vendorKey]);
   if (vendor.authType !== "none" && !apiKey) throw new Error(`API key missing: ${vendorKey}`);
   return { vendor, model, apiKey };
 }
@@ -1135,35 +1900,24 @@ function findExecutableModelForTask(vendorKey: string, modelKey: string, kind: B
   return findExecutableModel(vendorKey, model.modelKey, kind);
 }
 
+// Thin Vendor→primitive adapters over the shared requestPipeline auth logic
+// (the shared module is electron-free and doesn't know the Vendor shape).
 function authHeaders(vendor: Vendor, apiKey: string): Record<string, string> {
-  if (!apiKey || vendor.authType === "none") return {};
-  if (vendor.authType === "x-api-key") return { [vendor.authHeader || "X-API-Key"]: apiKey };
-  if (vendor.authType === "query") return {};
-  return { Authorization: `Bearer ${apiKey}` };
+  return buildAuthHeaders(vendor.authType as AuthType, apiKey, vendor.authHeader ?? undefined);
 }
 
 function authQueryParams(vendor: Vendor, apiKey: string): Record<string, string> {
-  if (!apiKey || vendor.authType !== "query") return {};
-  return { [vendor.authQueryParam || "api_key"]: apiKey };
+  return buildAuthQueryParams(vendor.authType as AuthType, apiKey, vendor.authQueryParam ?? undefined);
 }
 
 function endpoint(vendor: Vendor, suffix: string): string {
   const base = String(vendor.baseUrlHint || "").trim().replace(/\/+$/, "");
   if (!base) throw new Error(`Base URL missing: ${vendor.key}`);
+  // Don't double-append: if the vendor already configured a baseUrlHint that
+  // ends in the suffix (e.g. /v1), respect it. Users routinely paste full
+  // "https://api.example.com/v1" URLs.
+  if (suffix && base.endsWith(suffix)) return base;
   return `${base}${suffix}`;
-}
-
-function appendQueryParams(url: string, params: Record<string, unknown>): string {
-  const parsed = new URL(url);
-  for (const [key, value] of Object.entries(params)) {
-    if (!key || value == null) continue;
-    const values = Array.isArray(value) ? value : [value];
-    for (const item of values) {
-      if (item == null || item === "") continue;
-      parsed.searchParams.append(key, String(item));
-    }
-  }
-  return parsed.toString();
 }
 
 function firstString(...values: unknown[]): string {
@@ -1197,12 +1951,6 @@ function extractAssetUrl(raw: unknown): string {
     (record.result as JsonRecord | undefined)?.image_url,
   ];
   return firstString(...candidates);
-}
-
-function extractTaskId(raw: unknown): string {
-  if (!raw || typeof raw !== "object") return "";
-  const record = raw as JsonRecord;
-  return firstString(record.id, record.taskId, record.task_id, (record.data as JsonRecord | undefined)?.id);
 }
 
 async function postJson(url: string, apiKey: string, vendor: Vendor, body: unknown): Promise<unknown> {
@@ -1246,21 +1994,6 @@ function findTaskMapping(vendorKey: string, taskKind: ProfileKind): Mapping | nu
   return state.mappings.find((mapping) => mapping.enabled && mapping.vendorKey === vendorKey && mapping.taskKind === taskKind) || null;
 }
 
-function requestProfileFromMapping(mapping: Mapping | null | undefined): JsonRecord | null {
-  if (!mapping) return null;
-  for (const candidate of [mapping.requestMapping, mapping.responseMapping]) {
-    if (isJsonRecord(candidate) && candidate.version === "v2" && candidate.enabled !== false) return candidate;
-  }
-  return null;
-}
-
-function profileOperation(profile: JsonRecord, stage: "create" | "query"): JsonRecord | null {
-  const group = profile[stage];
-  if (!isJsonRecord(group)) return null;
-  const operation = isJsonRecord(group.default) ? group.default : group;
-  return isJsonRecord(operation) ? operation : null;
-}
-
 function firstReferenceImage(request: TaskRequest): string {
   const extras = request.extras || {};
   const referenceImages = Array.isArray(extras.referenceImages) ? extras.referenceImages : [];
@@ -1297,83 +2030,19 @@ function taskTemplateParams(request: TaskRequest): JsonRecord {
   };
 }
 
+// Adapter over the shared requestPipeline context builder. Production maps the
+// rich TaskRequest fields into normalized params via `taskTemplateParams`; the
+// canonical context shape (model/account/user_api_key/providerMeta) lives in the
+// shared module so the wizard test and production build identical contexts.
 function templateContext(request: TaskRequest, model: Model, apiKey: string, providerMeta: JsonRecord = {}): JsonRecord {
-  const params = taskTemplateParams(request);
-  return {
-    request: {
-      ...request,
-      params,
-    },
-    model: {
-      ...model,
-      model_key: model.modelAlias || model.modelKey,
-      model_alias: model.modelAlias || model.modelKey,
-    },
-    account: {
-      account_key: apiKey,
-      api_key: apiKey,
-    },
+  return buildTemplateContext({
+    request: request as unknown as JsonRecord,
+    params: taskTemplateParams(request),
+    model: model as unknown as JsonRecord,
+    modelKey: model.modelAlias || model.modelKey,
+    apiKey,
     providerMeta,
-  };
-}
-
-function readTemplatePath(context: JsonRecord, expression: string): unknown {
-  const normalized = expression.trim();
-  if (!normalized) return undefined;
-  const parts = normalized.split(".").map((part) => part.trim()).filter(Boolean);
-  let current: unknown = context;
-  for (const part of parts) {
-    if (!isJsonRecord(current)) return undefined;
-    current = current[part];
-  }
-  return current;
-}
-
-function renderTemplateString(input: string, context: JsonRecord): unknown {
-  const exact = input.match(/^\{\{\s*([^}]+)\s*\}\}$/);
-  if (exact) return readTemplatePath(context, exact[1]);
-  return input.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_match, expression: string) => {
-    const value = readTemplatePath(context, expression);
-    if (value == null) return "";
-    return typeof value === "string" ? value : JSON.stringify(value);
   });
-}
-
-function renderTemplateValue(value: unknown, context: JsonRecord): unknown {
-  if (typeof value === "string") return renderTemplateString(value, context);
-  if (Array.isArray(value)) {
-    return value.map((item) => renderTemplateValue(item, context)).filter((item) => typeof item !== "undefined");
-  }
-  if (isJsonRecord(value)) {
-    const out: JsonRecord = {};
-    for (const [key, child] of Object.entries(value)) {
-      const rendered = renderTemplateValue(child, context);
-      if (typeof rendered !== "undefined") out[key] = rendered;
-    }
-    return out;
-  }
-  return value;
-}
-
-function renderedRecord(value: unknown): Record<string, unknown> {
-  return isJsonRecord(value) ? value : {};
-}
-
-function stringifyHeaders(headers: Record<string, unknown>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (!key || value == null || value === "") continue;
-    out[key] = String(value);
-  }
-  return out;
-}
-
-function redactHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    out[key] = /authorization|api[-_]?key/i.test(key) ? "[redacted]" : value;
-  }
-  return out;
 }
 
 async function requestJson(
@@ -1400,16 +2069,27 @@ async function requestJson(
   } catch {
     json = text;
   }
-  if (!response.ok) {
-    const record = isJsonRecord(json) ? json : {};
-    throw new Error(firstString(record.message, record.error, readNestedRecord(record, ["error", "message"]), `Provider request failed: ${response.status}`));
+  const record = isJsonRecord(json) ? json : {};
+  // Many providers (kie.ai and other Java/Spring backends) return HTTP 200 with
+  // a logical-error envelope `{ code: 4xx/5xx, msg/message: "..." }` instead of
+  // a real error status. Treat that as a failure too, otherwise we'd hand a
+  // body with no asset URL to the result builder and report a silent dud.
+  const logicalCode = looksLikeLogicalError(record);
+  if (!response.ok || logicalCode != null) {
+    const upstreamMsg = firstString(
+      record.msg,
+      record.message,
+      record.error,
+      readNestedRecord(record, ["error", "message"]),
+      readNestedRecord(record, ["data", "msg"]),
+    );
+    const statusLabel = logicalCode != null ? `code ${logicalCode}` : `HTTP ${response.status}`;
+    // "No message available" is Spring's default placeholder — surface the URL
+    // and status so the failure is diagnosable instead of opaque.
+    const detail = upstreamMsg && upstreamMsg !== "No message available" ? upstreamMsg : `(no detail from provider)`;
+    throw new Error(`Provider request failed (${statusLabel}) at ${vendor.key} ${upperMethod} ${url}: ${detail}`);
   }
   return json;
-}
-
-function operationUrl(vendor: Vendor, operationPath: string): string {
-  if (/^https?:\/\//i.test(operationPath)) return operationPath;
-  return endpoint(vendor, operationPath.startsWith("/") ? operationPath : `/${operationPath}`);
 }
 
 function buildProfileHttpRequest(input: {
@@ -1417,37 +2097,19 @@ function buildProfileHttpRequest(input: {
   model: Model;
   apiKey: string;
   request: TaskRequest;
-  operation: JsonRecord;
+  operation: HttpOperation;
   providerMeta?: JsonRecord;
 }): { method: string; url: string; headers: Record<string, string>; query: Record<string, unknown>; body: unknown; preview: unknown } {
-  const context = templateContext(input.request, input.model, input.apiKey, input.providerMeta || {});
-  const method = firstString(input.operation.method) || "POST";
-  const renderedPath = renderTemplateValue(input.operation.path || "/v1/tasks", context);
-  const url = operationUrl(input.vendor, String(renderedPath || "/v1/tasks"));
-  const renderedHeaders = stringifyHeaders(renderedRecord(renderTemplateValue(input.operation.headers, context)));
-  const headers = {
-    ...authHeaders(input.vendor, input.apiKey),
-    ...renderedHeaders,
-  };
-  const upperMethod = method.toUpperCase();
-  const renderedBody = renderTemplateValue(input.operation.body, context);
-  if (upperMethod !== "GET" && upperMethod !== "HEAD" && renderedBody != null && !Object.keys(headers).some((key) => key.toLowerCase() === "content-type")) {
-    headers["Content-Type"] = "application/json";
-  }
-  const query = renderedRecord(renderTemplateValue(input.operation.query, context));
-  return {
-    method: upperMethod,
-    url,
-    headers,
-    query,
-    body: renderedBody,
-    preview: {
-      method: upperMethod,
-      url: appendQueryParams(url, query),
-      headers: redactHeaders(headers),
-      body: renderedBody,
-    },
-  };
+  // Single source of truth: the shared requestPipeline builds the exact request
+  // the wizard test also builds, so "passed test" == "works in prod".
+  return buildHttpRequest({
+    baseUrl: String(input.vendor.baseUrlHint || ""),
+    authType: input.vendor.authType as AuthType,
+    authHeaderName: input.vendor.authHeader ?? undefined,
+    apiKey: input.apiKey,
+    context: templateContext(input.request, input.model, input.apiKey, input.providerMeta || {}),
+    operation: input.operation,
+  });
 }
 
 async function executeProfileOperation(input: {
@@ -1455,7 +2117,7 @@ async function executeProfileOperation(input: {
   model: Model;
   apiKey: string;
   request: TaskRequest;
-  operation: JsonRecord;
+  operation: HttpOperation;
   providerMeta?: JsonRecord;
 }): Promise<{ response: unknown; request: unknown }> {
   const built = buildProfileHttpRequest(input);
@@ -1466,6 +2128,19 @@ async function executeProfileOperation(input: {
   };
 }
 
+/**
+ * If `value` is a string that looks like serialized JSON ({...} or [...]),
+ * parse it. Some providers (kie.ai) return nested results as JSON strings
+ * (e.g. `data.resultJson = "{\"resultUrls\":[...]}"`) and the mapping path
+ * `data.resultJson.resultUrls.0` only works if we transparently parse.
+ */
+function maybeParseJsonString(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return value;
+  try { return JSON.parse(trimmed); } catch { return value; }
+}
+
 function pathValues(input: unknown, expression: string): unknown[] {
   const parts = expression.split(".").map((part) => part.trim()).filter(Boolean);
   let current: unknown[] = [input];
@@ -1473,7 +2148,8 @@ function pathValues(input: unknown, expression: string): unknown[] {
     const wildcard = part.endsWith("[*]");
     const key = wildcard ? part.slice(0, -3) : part;
     const next: unknown[] = [];
-    for (const item of current) {
+    for (const rawItem of current) {
+      const item = maybeParseJsonString(rawItem);
       let value: unknown;
       if (/^\d+$/.test(key) && Array.isArray(item)) {
         value = item[Number(key)];
@@ -1483,7 +2159,8 @@ function pathValues(input: unknown, expression: string): unknown[] {
         value = item;
       }
       if (wildcard) {
-        if (Array.isArray(value)) next.push(...value);
+        const parsed = maybeParseJsonString(value);
+        if (Array.isArray(parsed)) next.push(...parsed);
       } else if (typeof value !== "undefined") {
         next.push(value);
       }
@@ -1526,7 +2203,7 @@ function collectAssetUrls(value: unknown): string[] {
   return [];
 }
 
-function taskStatusFromResponse(response: unknown, responseMapping: JsonRecord | null, profile: JsonRecord, assetUrls: string[]): TaskResult["status"] {
+function taskStatusFromResponse(response: unknown, responseMapping: JsonRecord | null, statusMapping: Record<string, string[]> | undefined, assetUrls: string[]): TaskResult["status"] {
   const mappedStatus = firstMappedString(response, responseMapping, "status");
   const fallbackStatus = firstString(
     mappedStatus,
@@ -1534,9 +2211,9 @@ function taskStatusFromResponse(response: unknown, responseMapping: JsonRecord |
     isJsonRecord(response) ? readNestedRecord(response, ["data", "status"]) : "",
     isJsonRecord(response) ? readNestedRecord(response, ["choices", "0", "finish_reason"]) : "",
   ).toLowerCase();
-  const statusMapping = isJsonRecord(profile.status_mapping) ? profile.status_mapping : {};
+  const sm = statusMapping || {};
   for (const status of ["queued", "running", "succeeded", "failed"] as const) {
-    const values = Array.isArray(statusMapping[status]) ? statusMapping[status] as unknown[] : [];
+    const values = Array.isArray(sm[status]) ? sm[status] : [];
     if (values.map((item) => String(item).toLowerCase()).includes(fallbackStatus)) return status;
   }
   if (["queued", "pending"].includes(fallbackStatus)) return "queued";
@@ -1556,7 +2233,7 @@ function providerMetaFromResponse(response: unknown, mapping: JsonRecord | null)
       if (value) meta[key] = value;
     }
   }
-  const taskId = firstString(meta.query_id, meta.task_id, extractTaskId(response));
+  const taskId = firstString(meta.query_id, meta.task_id, extractTaskIdShared(response));
   if (taskId) {
     meta.query_id = meta.query_id || taskId;
     meta.task_id = meta.task_id || taskId;
@@ -1566,8 +2243,8 @@ function providerMetaFromResponse(response: unknown, mapping: JsonRecord | null)
 
 async function buildProfileTaskResult(input: {
   response: unknown;
-  profile: JsonRecord;
-  operation: JsonRecord;
+  mapping: Mapping;
+  operation: HttpOperation;
   request: TaskRequest;
   taskIdFallback: string;
   wantedKind: BillingModelKind;
@@ -1581,7 +2258,7 @@ async function buildProfileTaskResult(input: {
     firstMappedString(input.response, responseMapping, "task_id"),
     providerMeta.task_id,
     providerMeta.query_id,
-    extractTaskId(input.response),
+    extractTaskIdShared(input.response),
     input.taskIdFallback,
   );
   const mappedAssetValues = [
@@ -1593,7 +2270,7 @@ async function buildProfileTaskResult(input: {
     ...mappedAssetValues.flatMap(collectAssetUrls),
     ...collectAssetUrls(extractAssetUrl(input.response)),
   ]));
-  const status = taskStatusFromResponse(input.response, responseMapping, input.profile, assetUrls);
+  const status = taskStatusFromResponse(input.response, responseMapping, input.mapping.statusMapping, assetUrls);
   const type: "image" | "video" = input.wantedKind === "video" ? "video" : "image";
   const assets = input.projectId
     ? await Promise.all(assetUrls.map((url) => localizeTaskAsset(input.projectId || "", url, type, input.nodeId)))
@@ -1623,15 +2300,13 @@ export async function runTask(payload: unknown): Promise<TaskResult> {
   const nodeId = trim(request.extras?.nodeId);
   const taskId = `task-${crypto.randomUUID()}`;
   const mapping = findTaskMapping(vendorKey, kind);
-  const profile = requestProfileFromMapping(mapping);
-  const createOperation = profile ? profileOperation(profile, "create") : null;
 
-  if (profile && createOperation) {
-    const executed = await executeProfileOperation({ vendor, model, apiKey, request, operation: createOperation });
+  if (mapping) {
+    const executed = await executeProfileOperation({ vendor, model, apiKey, request, operation: mapping.create });
     const normalized = await buildProfileTaskResult({
       response: executed.response,
-      profile,
-      operation: createOperation,
+      mapping,
+      operation: mapping.create,
       request,
       taskIdFallback: taskId,
       wantedKind,
@@ -1685,7 +2360,7 @@ export async function runTask(payload: unknown): Promise<TaskResult> {
     extras: request.extras,
   });
   const assetUrl = extractAssetUrl(providerResponse);
-  const upstreamTaskId = extractTaskId(providerResponse) || taskId;
+  const upstreamTaskId = extractTaskIdShared(providerResponse) || taskId;
   if (!assetUrl) {
     taskCache.set(upstreamTaskId, { vendor: vendorKey, request, raw: providerResponse, model, apiKey, projectId, nodeId, wantedKind });
     return { id: upstreamTaskId, kind, status: "queued", assets: [], raw: providerResponse };
@@ -1694,7 +2369,25 @@ export async function runTask(payload: unknown): Promise<TaskResult> {
   const asset: TaskResult["assets"][number] = projectId
     ? await localizeTaskAsset(projectId, assetUrl, type, nodeId)
     : { type, url: assetUrl, thumbnailUrl: type === "image" ? assetUrl : null };
-  return { id: upstreamTaskId, kind, status: "succeeded", assets: [asset], raw: providerResponse };
+  // E11: provenance — captures everything needed to reproduce this exact
+  // generation months later (model + prompt + seed + params).
+  const provenance: NonNullable<TaskResult["provenance"]> = {
+    provider: vendor.key,
+    modelKey: model.modelAlias || model.modelKey,
+    prompt: request.prompt,
+    ...(request.negativePrompt ? { negativePrompt: request.negativePrompt } : {}),
+    ...(typeof request.seed === "number" ? { seed: request.seed } : {}),
+    params: {
+      ...(request.width != null ? { width: request.width } : {}),
+      ...(request.height != null ? { height: request.height } : {}),
+      ...(request.steps != null ? { steps: request.steps } : {}),
+      ...(request.cfgScale != null ? { cfgScale: request.cfgScale } : {}),
+      ...(request.extras ? { extras: request.extras } : {}),
+    },
+    vendorRequestId: upstreamTaskId,
+    timestamp: Date.now(),
+  };
+  return { id: upstreamTaskId, kind, status: "succeeded", assets: [asset], raw: providerResponse, provenance };
 }
 
 export async function fetchTaskResult(payload: unknown): Promise<{ vendor: string; result: TaskResult }> {
@@ -1713,9 +2406,8 @@ export async function fetchTaskResult(payload: unknown): Promise<{ vendor: strin
       },
     };
   }
-  const profile = requestProfileFromMapping(cached.mapping);
-  const queryOperation = profile ? profileOperation(profile, "query") : null;
-  if (profile && queryOperation && cached.model && cached.apiKey) {
+  const queryOperation = cached.mapping?.query;
+  if (cached.mapping && queryOperation && cached.model && cached.apiKey) {
     const { vendor, model, apiKey } = findExecutableModel(
       cached.vendor,
       cached.model.modelKey,
@@ -1735,7 +2427,7 @@ export async function fetchTaskResult(payload: unknown): Promise<{ vendor: strin
     });
     const normalized = await buildProfileTaskResult({
       response: executed.response,
-      profile,
+      mapping: cached.mapping,
       operation: queryOperation,
       request: cached.request,
       taskIdFallback: taskId,
@@ -1787,7 +2479,7 @@ function chooseTextModel(): { vendor: Vendor; model: Model; apiKey: string } {
   const state = readCatalog();
   for (const model of state.models.filter((item) => item.kind === "text" && item.enabled)) {
     const vendor = state.vendors.find((item) => item.key === model.vendorKey && item.enabled);
-    const apiKey = state.apiKeysByVendor[model.vendorKey]?.apiKey || "";
+    const apiKey = decryptApiKeyRecord(state.apiKeysByVendor[model.vendorKey]);
     if (vendor && (vendor.authType === "none" || apiKey)) return { vendor, model, apiKey };
   }
   throw new Error("No local text model is configured. Open model settings and add an API key.");
@@ -1798,26 +2490,255 @@ export async function runAgentChat(payload: unknown): Promise<unknown> {
   const { vendor, model, apiKey } = chooseTextModel();
   const systemPrompt = trim(raw.systemPrompt);
   const skillSystemPrompt = buildSkillSystemPrompt(raw);
-  const messages = [
-    ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
-    ...(skillSystemPrompt ? [{ role: "system", content: skillSystemPrompt }] : []),
-    { role: "user", content: trim(raw.prompt) || trim(raw.displayPrompt) },
-  ];
-  const response = await postJson(endpoint(vendor, "/v1/chat/completions"), apiKey, vendor, {
-    model: model.modelAlias || model.modelKey,
-    messages,
+  const userPrompt = trim(raw.prompt) || trim(raw.displayPrompt);
+
+  // Compose system prompts into one (AI SDK `generateText` takes a single
+  // `system` string). The language directive is always present, so `system`
+  // is never undefined.
+  const systemParts = [AGENT_LANGUAGE_DIRECTIVE, systemPrompt, skillSystemPrompt].filter((part) => part && part.length > 0);
+  const system = systemParts.length > 0 ? systemParts.join("\n\n") : undefined;
+
+  const providerKind: AiSdkProviderKind = vendor.providerKind || "openai-compatible";
+  const baseURL = providerKind === "anthropic"
+    ? (vendor.baseUrlHint || "").trim()
+    : endpoint(vendor, "/v1");
+
+  const languageModel = buildAiSdkModel({
+    kind: providerKind,
+    baseURL,
+    apiKey,
+    modelId: model.modelAlias || model.modelKey,
+  });
+
+  const result = await generateText({
+    model: languageModel,
+    ...(system ? { system } : {}),
+    messages: [{ role: "user", content: userPrompt }],
     temperature: typeof raw.temperature === "number" ? raw.temperature : 0.7,
   });
-  const text = firstString(
-    ((response as JsonRecord).choices as JsonRecord[] | undefined)?.[0]?.message && (((response as JsonRecord).choices as JsonRecord[])[0].message as JsonRecord).content,
-    ((response as JsonRecord).choices as JsonRecord[] | undefined)?.[0]?.text,
-    (response as JsonRecord).text,
-  );
+
   return {
     id: `agent-${crypto.randomUUID()}`,
-    text,
-    raw: response,
+    text: result.text,
+    raw: {
+      finishReason: result.finishReason,
+      usage: result.usage,
+      response: result.response,
+      providerMetadata: result.providerMetadata,
+    },
     toolCalls: [],
     artifacts: [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// runAgentChatV2 — Phase B: tool-calling + real streaming
+// ---------------------------------------------------------------------------
+//
+// `runAgentChat` (v1) is kept untouched as a fallback. v2 wires the canvas
+// tools through `streamText` and surfaces token deltas + tool-call lifecycle
+// to the renderer via an injected `emit` callback. The IPC layer (electron/
+// main.ts) is responsible for forwarding those events on a per-session
+// channel and for resolving the `awaitToolConfirmation` promise once the
+// user confirms or rejects the proposed tool call.
+// ---------------------------------------------------------------------------
+
+export type AgentChatV2Event =
+  | { type: "content-delta"; delta: string }
+  | { type: "tool-call"; toolCallId: string; toolName: CanvasToolName; args: unknown }
+  | { type: "tool-result"; toolCallId: string; toolName: CanvasToolName; result: unknown }
+  | { type: "tool-error"; toolCallId: string; toolName: CanvasToolName; message: string }
+  | { type: "step-finish"; finishReason: string }
+  | { type: "finish"; finishReason: string; usage?: unknown }
+  | { type: "error"; message: string };
+
+export type AgentToolConfirmation =
+  | { ok: true; result: unknown }
+  | { ok: false; message: string };
+
+export type AgentChatV2Hooks = {
+  emit: (event: AgentChatV2Event) => void;
+  /**
+   * Called when the LLM emits a tool call. The host (renderer over IPC) must
+   * resolve with either `{ ok: true, result }` to feed the result back to
+   * the model and continue the loop, or `{ ok: false, message }` to short
+   * circuit the tool with an error result.
+   */
+  awaitToolConfirmation: (call: {
+    toolCallId: string;
+    toolName: CanvasToolName;
+    args: unknown;
+  }) => Promise<AgentToolConfirmation>;
+};
+
+function buildCanvasToolsForV2(hooks: AgentChatV2Hooks) {
+  function makeTool<TParams extends z.ZodTypeAny>(
+    toolName: CanvasToolName,
+    description: string,
+    parameters: TParams,
+  ) {
+    return tool({
+      description,
+      parameters,
+      execute: async (args: unknown, opts: { toolCallId: string }) => {
+        hooks.emit({ type: "tool-call", toolCallId: opts.toolCallId, toolName, args });
+        const confirmation = await hooks.awaitToolConfirmation({
+          toolCallId: opts.toolCallId,
+          toolName,
+          args,
+        });
+        if (!confirmation.ok) {
+          hooks.emit({
+            type: "tool-error",
+            toolCallId: opts.toolCallId,
+            toolName,
+            message: confirmation.message,
+          });
+          // Surface as a structured tool result so the LLM can gracefully stop.
+          return { ok: false as const, error: confirmation.message };
+        }
+        hooks.emit({
+          type: "tool-result",
+          toolCallId: opts.toolCallId,
+          toolName,
+          result: confirmation.result,
+        });
+        return { ok: true as const, result: confirmation.result };
+      },
+    });
+  }
+
+  return {
+    read_canvas_state: makeTool(
+      "read_canvas_state",
+      "Read the current generation canvas (nodes + edges).",
+      z.object({}),
+    ),
+    create_canvas_nodes: makeTool(
+      "create_canvas_nodes",
+      "Propose a batch of new canvas nodes for user confirmation.",
+      z.object({
+        summary: z.string(),
+        nodes: z.array(plannedNodeSchema).min(1).max(24),
+      }),
+    ),
+    connect_canvas_edges: makeTool(
+      "connect_canvas_edges",
+      "Connect nodes with reference edges (source feeds target).",
+      z.object({
+        edges: z.array(plannedEdgeSchema).min(1).max(48),
+      }),
+    ),
+    set_node_prompt: makeTool(
+      "set_node_prompt",
+      "Rewrite the prompt of an existing node.",
+      z.object({
+        nodeId: z.string().min(1),
+        prompt: z.string().min(1),
+      }),
+    ),
+    delete_canvas_nodes: makeTool(
+      "delete_canvas_nodes",
+      "Delete one or more existing canvas nodes (destructive).",
+      z.object({
+        nodeIds: z.array(z.string().min(1)).min(1).max(24),
+        // Keep a hint slot so the model can surface its rationale to the user
+        // before destructive confirmation.
+        reason: z.string().optional(),
+      }),
+    ),
+    // Silence unused-import warning for canvasNodeKindSchema by re-exporting
+    // it through the tool registry shape (it's enforced via plannedNodeSchema).
+    _kindSchema: canvasNodeKindSchema,
+  } as const;
+}
+
+export type RunAgentChatV2Payload = {
+  prompt: string;
+  displayPrompt?: string;
+  systemPrompt?: string;
+  skill?: unknown;
+  skillKey?: string;
+  skillName?: string;
+  chatContext?: unknown;
+  mode?: string;
+  temperature?: number;
+};
+
+export async function runAgentChatV2(
+  payload: RunAgentChatV2Payload,
+  hooks: AgentChatV2Hooks,
+): Promise<{ id: string; text: string; finishReason: string; usage?: unknown }> {
+  const { vendor, model, apiKey } = chooseTextModel();
+  const systemPrompt = trim(payload.systemPrompt as unknown as JsonRecord["systemPrompt"]);
+  const skillSystemPrompt = buildSkillSystemPrompt(payload as unknown as JsonRecord);
+  const userPrompt = trim(payload.prompt) || trim(payload.displayPrompt);
+
+  const systemParts = [AGENT_LANGUAGE_DIRECTIVE, systemPrompt, skillSystemPrompt].filter((part) => part && part.length > 0);
+  const system = systemParts.length > 0 ? systemParts.join("\n\n") : undefined;
+
+  const providerKind: AiSdkProviderKind = vendor.providerKind || "openai-compatible";
+  const baseURL = providerKind === "anthropic"
+    ? (vendor.baseUrlHint || "").trim()
+    : endpoint(vendor, "/v1");
+
+  const languageModel = buildAiSdkModel({
+    kind: providerKind,
+    baseURL,
+    apiKey,
+    modelId: model.modelAlias || model.modelKey,
+  });
+
+  // Strip the private `_kindSchema` slot before handing to the SDK — it's only
+  // used internally to keep the import live; the SDK only expects tool
+  // descriptors.
+  const allTools = buildCanvasToolsForV2(hooks);
+  const { _kindSchema, ...tools } = allTools;
+  void _kindSchema;
+
+  const result = streamText({
+    model: languageModel,
+    ...(system ? { system } : {}),
+    messages: [{ role: "user", content: userPrompt }],
+    temperature: typeof payload.temperature === "number" ? payload.temperature : 0.7,
+    tools,
+    maxSteps: 5,
+    toolCallStreaming: true,
+    onError: ({ error }) => {
+      const message = error instanceof Error ? error.message : String(error);
+      hooks.emit({ type: "error", message });
+    },
+  });
+
+  let finalText = "";
+  let finalFinish = "unknown";
+  let finalUsage: unknown;
+
+  for await (const chunk of result.fullStream) {
+    if (chunk.type === "text-delta") {
+      finalText += chunk.textDelta;
+      hooks.emit({ type: "content-delta", delta: chunk.textDelta });
+    } else if (chunk.type === "step-finish") {
+      hooks.emit({ type: "step-finish", finishReason: chunk.finishReason });
+    } else if (chunk.type === "finish") {
+      finalFinish = chunk.finishReason;
+      finalUsage = chunk.usage;
+    } else if (chunk.type === "error") {
+      const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error);
+      hooks.emit({ type: "error", message });
+    }
+    // tool-call / tool-result events are already emitted from inside each
+    // tool's `execute` (which is where we have access to the awaited user
+    // confirmation result). We deliberately ignore the SDK's mirror events
+    // here to avoid double-emit.
+  }
+
+  hooks.emit({ type: "finish", finishReason: finalFinish, usage: finalUsage });
+
+  return {
+    id: `agent-${crypto.randomUUID()}`,
+    text: finalText,
+    finishReason: finalFinish,
+    usage: finalUsage,
   };
 }

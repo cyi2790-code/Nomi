@@ -1,3 +1,6 @@
+import type { ExportJobEvent, ExportJobSnapshot } from '../../electron/export/exportJobManager'
+import type { WorkspaceFileListResult } from '../../electron/workspace/workspaceFileIndex'
+
 export type DesktopAssetDto = {
   id: string
   name: string
@@ -8,8 +11,42 @@ export type DesktopAssetDto = {
   data: Record<string, unknown>
 }
 
+export type DesktopMp4ExportResult = {
+  absolutePath: string
+  relativePath: string
+  size: number
+}
+
+export type DesktopExportJobStartPayload = {
+  projectId: string
+  manifest: unknown
+  outputName?: string
+}
+
+export type DesktopExportJobStartResult = {
+  jobId: string
+}
+
+export type DesktopExportTempInputWritePayload = {
+  jobId: string
+  chunk: ArrayBuffer | Uint8Array | number[]
+}
+
+export type DesktopExportTempInputWriteResult = {
+  ok: true
+  size: number
+}
+
+export type { ExportJobEvent, ExportJobSnapshot }
+
 export type DesktopBridge = {
   platform: string
+  workspace: {
+    selectFolder: () => Promise<{ canceled: true } | { canceled: false; rootPath: string }>
+    openFolder: (payload: { rootPath: string; initialize?: boolean; name?: string }) => Promise<unknown>
+    listFiles: (payload: { projectId: string; limit?: number }) => Promise<WorkspaceFileListResult>
+    revealFile: (payload: { projectId: string; relativePath: string }) => Promise<{ ok: boolean }>
+  }
   projects: {
     list: () => unknown[]
     create: (record: unknown) => unknown
@@ -39,12 +76,45 @@ export type DesktopBridge = {
       kind?: string
     }) => Promise<DesktopAssetDto>
   }
+  exports: {
+    startJob: (payload: DesktopExportJobStartPayload) => Promise<DesktopExportJobStartResult>
+    writeTempInput: (payload: DesktopExportTempInputWritePayload) => Promise<DesktopExportTempInputWriteResult>
+    finishTempInput: (payload: { jobId: string }) => Promise<DesktopMp4ExportResult>
+    status: (jobId: string) => Promise<ExportJobSnapshot>
+    cancel: (jobId: string) => Promise<{ ok: boolean }>
+    onEvent: (callback: (event: ExportJobEvent) => void) => () => void
+    showInFolder: (payload: { projectId: string; relativePath: string }) => Promise<{ ok: boolean }>
+  }
   tasks: {
     run: (payload: unknown) => Promise<unknown>
     result: (payload: unknown) => Promise<unknown>
   }
   agents: {
     chat: (payload: unknown) => Promise<unknown>
+    chatV2Start: (payload: unknown) => Promise<{ sessionId: string }>
+    confirmTool: (
+      sessionId: string,
+      toolCallId: string,
+      decision: { ok: true; result?: unknown } | { ok: false; message?: string },
+    ) => Promise<{ ok: boolean; error?: string }>
+    cancelChatV2: (sessionId: string) => Promise<{ ok: boolean; error?: string }>
+    onChatV2Event: (sessionId: string, callback: (event: unknown) => void) => () => void
+  }
+  onboarding: {
+    start: (payload: {
+      docsUrl: string
+      userApiKey: string
+      targetKind?: 'text' | 'image' | 'video' | 'audio'
+      maxSteps?: number
+      agent?: {
+        providerKind?: 'openai-compatible' | 'anthropic'
+        baseUrl?: string
+        modelId?: string
+        apiKey?: string
+      }
+    }) => Promise<{ trialId: string }>
+    cancel: (trialId: string) => Promise<{ ok: boolean; error?: string }>
+    onEvent: (trialId: string, callback: (event: unknown) => void) => () => void
   }
   modelCatalog: {
     listVendors: () => unknown[]

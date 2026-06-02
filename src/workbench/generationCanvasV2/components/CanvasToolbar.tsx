@@ -2,23 +2,23 @@ import React from 'react'
 import {
   IconCopy,
   IconCut,
-  IconPlus,
+  IconPlayerPlay,
+  IconTimelineEventPlus,
 } from '@tabler/icons-react'
 import { WorkbenchButton } from '../../../design'
 import { cn } from '../../../utils/cn'
+import { toast } from '../../../ui/toast'
 import type { GenerationNodeKind } from '../model/generationCanvasTypes'
 import { getGenerationNodePlugin, getQuickAddGenerationNodePlugins } from '../nodes/renderRegistry'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'
+import { sendStoryboardToTimeline } from '../agent/sendStoryboardToTimeline'
+import { runGenerationNodesBatch } from '../runner/generationRunController'
 
 const QUICK_ADD_NODE_ITEMS = getQuickAddGenerationNodePlugins()
 
 function NodePluginIcon({ kind, size }: { kind: GenerationNodeKind; size: number }): JSX.Element {
   const Icon = getGenerationNodePlugin(kind).icon
   return <Icon size={size} />
-}
-
-type CanvasToolbarProps = {
-  getInsertionPosition: () => { x: number; y: number }
 }
 
 type NodeAddMenuProps = {
@@ -75,17 +75,18 @@ export function NodeAddMenu({
   )
 }
 
+type CanvasToolbarProps = {
+  getInsertionPosition: () => { x: number; y: number }
+}
+
 export default function CanvasToolbar({ getInsertionPosition }: CanvasToolbarProps): JSX.Element {
   const addNode = useGenerationCanvasStore((state) => state.addNode)
   const selectedNodeIds = useGenerationCanvasStore((state) => state.selectedNodeIds)
   const copySelectedNodes = useGenerationCanvasStore((state) => state.copySelectedNodes)
   const cutSelectedNodes = useGenerationCanvasStore((state) => state.cutSelectedNodes)
-  const pendingConnectionSourceId = useGenerationCanvasStore((state) => state.pendingConnectionSourceId)
-  const [nodeMenuOpen, setNodeMenuOpen] = React.useState(false)
 
   const handleAddNode = (kind: GenerationNodeKind) => {
     addNode({ kind, position: getInsertionPosition() })
-    setNodeMenuOpen(false)
   }
 
   return (
@@ -98,21 +99,6 @@ export default function CanvasToolbar({ getInsertionPosition }: CanvasToolbarPro
       )}
       aria-label="生成画布工具栏"
     >
-      <WorkbenchButton
-        className={cn(
-          'w-8 h-8 min-h-8 p-0 border-0 rounded-nomi-sm cursor-pointer',
-          'data-[primary=true]:bg-nomi-ink data-[primary=true]:text-nomi-paper',
-        )}
-        aria-label="添加节点"
-        title="添加节点"
-        data-primary="true"
-        onClick={() => setNodeMenuOpen((open) => !open)}
-      >
-        <IconPlus size={17} />
-        <span className="hidden">添加</span>
-      </WorkbenchButton>
-      {nodeMenuOpen ? <NodeAddMenu onAddNode={handleAddNode} /> : null}
-      <span className={cn('w-5 h-px bg-workbench-border')} />
       <WorkbenchButton
         className={cn('w-8 h-8 min-h-8 p-0 border-0 rounded-nomi-sm cursor-pointer')}
         aria-label="添加文本节点"
@@ -140,10 +126,16 @@ export default function CanvasToolbar({ getInsertionPosition }: CanvasToolbarPro
         <NodePluginIcon kind="video" size={15} />
         <span className="hidden">视频</span>
       </WorkbenchButton>
+      <WorkbenchButton
+        className={cn('w-8 h-8 min-h-8 p-0 border-0 rounded-nomi-sm cursor-pointer')}
+        aria-label="添加全景图节点"
+        title="全景图"
+        onClick={() => handleAddNode('panorama')}
+      >
+        <NodePluginIcon kind="panorama" size={15} />
+        <span className="hidden">全景图</span>
+      </WorkbenchButton>
       <span className={cn('w-5 h-px bg-workbench-border')} />
-      <span className={cn('hidden', pendingConnectionSourceId && 'text-workbench-accent')}>
-        {pendingConnectionSourceId ? '选择目标节点' : '拖拽空白区域平移'}
-      </span>
       <WorkbenchButton
         className={cn('w-8 h-8 min-h-8 p-0 border-0 rounded-nomi-sm cursor-pointer disabled:cursor-not-allowed disabled:opacity-[0.42]')}
         aria-label="复制选中节点"
@@ -163,6 +155,61 @@ export default function CanvasToolbar({ getInsertionPosition }: CanvasToolbarPro
       >
         <IconCut size={15} />
         <span className="hidden">剪切</span>
+      </WorkbenchButton>
+      <span className={cn('w-5 h-px bg-workbench-border')} />
+      <WorkbenchButton
+        className={cn('w-8 h-8 min-h-8 p-0 border-0 rounded-nomi-sm cursor-pointer disabled:cursor-not-allowed disabled:opacity-[0.42]')}
+        aria-label="批量生成所有选中节点"
+        title="全部生成（限并发 2，失败自动重试）"
+        data-storyboard-run-all="true"
+        disabled={selectedNodeIds.length === 0}
+        onClick={() => {
+          const ids = [...selectedNodeIds]
+          const total = ids.length
+          if (total === 0) return
+          toast(`开始批量生成 ${total} 个节点…`, 'info')
+          void runGenerationNodesBatch(ids)
+            .then((result) => {
+              const okCount = result.successes.length
+              const failCount = result.failures.length
+              if (failCount === 0) {
+                toast(`已完成 ${okCount}/${total} 个节点的生成`, 'success')
+              } else if (okCount === 0) {
+                toast(`批量生成失败：${failCount}/${total} 个节点未完成`, 'error')
+              } else {
+                toast(`已完成 ${okCount}/${total}，${failCount} 个失败 — 在画布上单独重试`, 'info')
+              }
+            })
+            .catch((error: unknown) => {
+              const message = error instanceof Error && error.message ? error.message : '批量生成异常'
+              toast(message, 'error')
+            })
+        }}
+      >
+        <IconPlayerPlay size={15} />
+        <span className="hidden">全部生成</span>
+      </WorkbenchButton>
+      <WorkbenchButton
+        className={cn('w-8 h-8 min-h-8 p-0 border-0 rounded-nomi-sm cursor-pointer disabled:cursor-not-allowed disabled:opacity-[0.42]')}
+        aria-label="把选中节点按时序发送到时间轴"
+        title="发送到时间轴（按时序连边排序）"
+        data-storyboard-send-to-timeline="true"
+        disabled={selectedNodeIds.length < 2}
+        onClick={() => {
+          const result = sendStoryboardToTimeline(selectedNodeIds)
+          if (!result.ok) {
+            toast('选中的节点都还没有可用资产，无法发送到时间轴', 'error')
+            return
+          }
+          if (result.skipped.length > 0) {
+            toast(`已发送 ${result.sent.length} / ${result.total} 节点（${result.skipped.length} 个尚未生成）`, 'info')
+          } else {
+            toast(`已发送 ${result.sent.length} 个节点到时间轴`, 'success')
+          }
+        }}
+      >
+        <IconTimelineEventPlus size={15} />
+        <span className="hidden">发送到时间轴</span>
       </WorkbenchButton>
     </div>
   )

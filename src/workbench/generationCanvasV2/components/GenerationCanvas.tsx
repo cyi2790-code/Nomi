@@ -1,26 +1,33 @@
 import React from 'react'
-import { IconCopy, IconCut, IconX } from '@tabler/icons-react'
-import { Scissors } from 'lucide-react'
+import { IconCopy, IconCut, IconFolderPlus, IconX } from '@tabler/icons-react'
+import { IconScissors } from '@tabler/icons-react'
 import { WorkbenchButton, WorkbenchIconButton } from '../../../design'
 import { toast } from '../../../ui/toast'
 import { cn } from '../../../utils/cn'
 import CanvasToolbar, { NodeAddMenu } from './CanvasToolbar'
 import { importImageFilesToGenerationCanvas } from '../adapters/assetImportAdapter'
 import { getDesktopBridge } from '../../../desktop/bridge'
+import { WORKSPACE_FILE_DRAG_MIME, buildWorkspaceFileUrl, parseWorkspaceFileDrag } from '../../explorer/workspaceFileDrag'
 import { EDGE_MODE_LABEL } from '../model/graphOps'
-import type { GenerationCanvasNode, GenerationNodeKind } from '../model/generationCanvasTypes'
+import type { GenerationCanvasNode, GenerationNodeKind, NodeGroup } from '../model/generationCanvasTypes'
 import { getGenerationNodeComponent } from '../nodes/renderRegistry'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'
 import { notifyModelOptionsRefresh, useModelOptionsState } from '../../../config/useModelOptions'
+import { useWorkbenchStore } from '../../workbenchStore'
+import { GroupFrameList, type CanvasGroupBox } from './GroupFrame'
 import '../styles/generationCanvas.css'
 
 const GENERATION_PROVIDER = 'chatfire'
 const GENERATION_DEFAULT_BASE_URL = 'https://api.chatfire.site'
 const OPEN_MODEL_CATALOG_EVENT = 'nomi-open-model-catalog'
+const FOCUS_GENERATION_NODE_EVENT = 'nomi-focus-generation-node'
 const WHEEL_ZOOM_FACTOR = 1.24
 const WHEEL_ZOOM_DELTA = 120
 const WHEEL_LINE_HEIGHT = 16
 const WHEEL_PAGE_HEIGHT = 800
+const GROUP_BOX_PADDING = 24
+const GROUP_BOX_LABEL_HEIGHT = 28
+const DEFAULT_NODE_SIZE = { width: 320, height: 360 }
 
 type GenerationCanvasProps = {
   readOnly?: boolean
@@ -94,10 +101,7 @@ function createInitialViewport(): { zoom: number; offset: { x: number; y: number
 }
 
 function getNodeSize(node: GenerationCanvasNode): { width: number; height: number } {
-  return {
-    width: node.size?.width || 300,
-    height: node.size?.height || 220,
-  }
+  return node.size || DEFAULT_NODE_SIZE
 }
 
 function getSelectedBounds(nodes: readonly GenerationCanvasNode[], selectedNodeIds: readonly string[]): {
@@ -118,18 +122,75 @@ function getSelectedBounds(nodes: readonly GenerationCanvasNode[], selectedNodeI
   }
 }
 
+function centerNodeOffset(node: GenerationCanvasNode, stageSize: { width: number; height: number }, zoom: number): { x: number; y: number } {
+  const size = getNodeSize(node)
+  return {
+    x: Math.round(stageSize.width / 2 - (node.position.x + size.width / 2) * zoom),
+    y: Math.round(stageSize.height / 2 - (node.position.y + size.height / 2) * zoom),
+  }
+}
+
+function getCanvasGroupBoxes(groups: readonly NodeGroup[], nodes: readonly GenerationCanvasNode[]): CanvasGroupBox[] {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]))
+  return groups.flatMap((group) => {
+    const members = group.nodeIds.flatMap((nodeId) => {
+      const node = nodeById.get(nodeId)
+      return node && (node.categoryId || 'shots') === group.categoryId ? [node] : []
+    })
+    if (!members.length) return []
+    const minX = Math.min(...members.map((node) => node.position.x))
+    const minY = Math.min(...members.map((node) => node.position.y))
+    const maxX = Math.max(...members.map((node) => node.position.x + getNodeSize(node).width))
+    const maxY = Math.max(...members.map((node) => node.position.y + getNodeSize(node).height))
+    return [{
+      group,
+      left: minX - GROUP_BOX_PADDING,
+      top: minY - GROUP_BOX_PADDING - GROUP_BOX_LABEL_HEIGHT,
+      width: maxX - minX + GROUP_BOX_PADDING * 2,
+      height: maxY - minY + GROUP_BOX_PADDING * 2 + GROUP_BOX_LABEL_HEIGHT,
+      memberCount: members.length,
+    }]
+  })
+}
+
 export default function GenerationCanvas({ readOnly = false }: GenerationCanvasProps): JSX.Element {
   const isReady = useGenerationCanvasStore((state) => state.isReady)
-  const nodes = useGenerationCanvasStore((state) => state.nodes)
-  const edges = useGenerationCanvasStore((state) => state.edges)
+  const allNodes = useGenerationCanvasStore((state) => state.nodes)
+  const allEdges = useGenerationCanvasStore((state) => state.edges)
+  const allGroups = useGenerationCanvasStore((state) => state.groups)
+  const activeCategoryId = useWorkbenchStore((state) => state.activeCategoryId)
+  const setActiveCategoryId = useWorkbenchStore((state) => state.setActiveCategoryId)
+  // Phase E3: filter nodes by active sub-canvas. Nodes with no categoryId
+  // fall back to the project default ("shots") so legacy projects keep
+  // rendering until E4 migrates them.
+  const nodes = React.useMemo(() => {
+    if (!activeCategoryId) return allNodes
+    return allNodes.filter((node) => (node.categoryId || 'shots') === activeCategoryId)
+  }, [allNodes, activeCategoryId])
+  const visibleNodeIds = React.useMemo(() => new Set(nodes.map((n) => n.id)), [nodes])
+  const edges = React.useMemo(
+    () => allEdges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)),
+    [allEdges, visibleNodeIds],
+  )
+  const groups = React.useMemo(
+    () => allGroups.filter((group) => group.categoryId === activeCategoryId),
+    [activeCategoryId, allGroups],
+  )
   const selectedNodeIds = useGenerationCanvasStore((state) => state.selectedNodeIds)
   const addNode = useGenerationCanvasStore((state) => state.addNode)
+  const updateNode = useGenerationCanvasStore((state) => state.updateNode)
   const clearSelection = useGenerationCanvasStore((state) => state.clearSelection)
   const setCanvasZoom = useGenerationCanvasStore((state) => state.setCanvasZoom)
   const deleteSelectedNodes = useGenerationCanvasStore((state) => state.deleteSelectedNodes)
   const copySelectedNodes = useGenerationCanvasStore((state) => state.copySelectedNodes)
   const cutSelectedNodes = useGenerationCanvasStore((state) => state.cutSelectedNodes)
   const pasteNodes = useGenerationCanvasStore((state) => state.pasteNodes)
+  const selectNode = useGenerationCanvasStore((state) => state.selectNode)
+  const groupSelectedNodes = useGenerationCanvasStore((state) => state.groupSelectedNodes)
+  const ungroupGroups = useGenerationCanvasStore((state) => state.ungroupGroups)
+  const moveGroupNodes = useGenerationCanvasStore((state) => state.moveGroupNodes)
+  const captureHistory = useGenerationCanvasStore((state) => state.captureHistory)
+  const commitPersistedChange = useGenerationCanvasStore((state) => state.commitPersistedChange)
   const selectNodesInRect = useGenerationCanvasStore((state) => state.selectNodesInRect)
   const disconnectEdge = useGenerationCanvasStore((state) => state.disconnectEdge)
   const pendingConnectionSourceId = useGenerationCanvasStore((state) => state.pendingConnectionSourceId)
@@ -141,6 +202,14 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
   const selectedSet = React.useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const nodeById = React.useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes])
   const selectedBounds = React.useMemo(() => getSelectedBounds(nodes, selectedNodeIds), [nodes, selectedNodeIds])
+  const groupBoxes = React.useMemo(() => getCanvasGroupBoxes(groups, nodes), [groups, nodes])
+  const selectedGroupIds = React.useMemo(() => {
+    const selected = new Set(selectedNodeIds)
+    return groups
+      .filter((group) => group.nodeIds.some((nodeId) => selected.has(nodeId)))
+      .map((group) => group.id)
+  }, [groups, selectedNodeIds])
+  const draggingGroupRef = React.useRef<{ groupId: string; clientX: number; clientY: number; moved: boolean } | null>(null)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
   const [apiKey, setApiKey] = React.useState(() => readProviderSetting('apiKey'))
   const [baseUrl, setBaseUrl] = React.useState(() => readProviderSetting('baseUrl'))
@@ -154,8 +223,28 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
 
   // Pan/zoom state
   const initialViewport = React.useMemo(() => createInitialViewport(), [])
-  const [zoom, setZoom] = React.useState(initialViewport.zoom)
-  const [offset, setOffset] = React.useState(initialViewport.offset)
+  const rememberCategoryViewport = useWorkbenchStore((state) => state.rememberCategoryViewport)
+  const categoryViewports = useWorkbenchStore((state) => state.categoryViewports)
+  // Phase E3: each graph-canvas category preserves its own zoom + offset
+  const seedViewport = React.useMemo(() => {
+    const remembered = categoryViewports[activeCategoryId]
+    return remembered || initialViewport
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCategoryId])
+  const [zoom, setZoom] = React.useState(seedViewport.zoom)
+  const [offset, setOffset] = React.useState(seedViewport.offset)
+  const lastCategoryRef = React.useRef(activeCategoryId)
+  React.useEffect(() => {
+    if (lastCategoryRef.current === activeCategoryId) return
+    // save outgoing
+    rememberCategoryViewport(lastCategoryRef.current, { zoom, offset })
+    // load incoming
+    const next = categoryViewports[activeCategoryId] || initialViewport
+    setZoom(next.zoom)
+    setOffset(next.offset)
+    lastCategoryRef.current = activeCategoryId
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCategoryId])
   const isPanningRef = React.useRef(false)
   const panStartRef = React.useRef<{ clientX: number; clientY: number; offsetX: number; offsetY: number } | null>(null)
   const offsetFrameRef = React.useRef<number | null>(null)
@@ -168,6 +257,43 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
     originCanvasY: number
   } | null>(null)
   const stageRef = React.useRef<HTMLDivElement>(null)
+  // E8 P0 G1: viewport-aware virtualization.
+  // When node count exceeds the threshold, we filter the render list to only
+  // nodes whose bounding box intersects the visible viewport (in canvas coords)
+  // expanded by VIRTUALIZATION_BUFFER_PX on every side. Below the threshold
+  // we keep current behavior (render every node) so small projects pay zero
+  // overhead.
+  const VIRTUALIZATION_THRESHOLD = 50
+  const VIRTUALIZATION_BUFFER_PX = 400
+  const [stageSize, setStageSize] = React.useState<{ width: number; height: number }>({ width: 0, height: 0 })
+  React.useEffect(() => {
+    const el = stageRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const update = () => setStageSize({ width: el.clientWidth, height: el.clientHeight })
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const visibleNodesForRender = React.useMemo(() => {
+    if (nodes.length <= VIRTUALIZATION_THRESHOLD || stageSize.width === 0 || stageSize.height === 0) {
+      return nodes
+    }
+    // Compute viewport in canvas coordinates
+    const z = zoom || 1
+    const viewLeft = -offset.x / z - VIRTUALIZATION_BUFFER_PX
+    const viewTop = -offset.y / z - VIRTUALIZATION_BUFFER_PX
+    const viewRight = viewLeft + stageSize.width / z + VIRTUALIZATION_BUFFER_PX * 2
+    const viewBottom = viewTop + stageSize.height / z + VIRTUALIZATION_BUFFER_PX * 2
+    return nodes.filter((node) => {
+      const nx = node.position.x
+      const ny = node.position.y
+      const nw = node.size?.width || 300
+      const nh = node.size?.height || 220
+      // AABB intersection test
+      return nx + nw >= viewLeft && nx <= viewRight && ny + nh >= viewTop && ny <= viewBottom
+    })
+  }, [nodes, zoom, offset, stageSize])
   const [selectionBox, setSelectionBox] = React.useState<{
     left: number
     top: number
@@ -184,6 +310,9 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
   const [isPanning, setIsPanning] = React.useState(false)
   const [activeEdge, setActiveEdge] = React.useState<ActiveEdge | null>(null)
   const activeEdgeId = activeEdge?.id ?? null
+  const [focusFlashNodeId, setFocusFlashNodeId] = React.useState<string | null>(null)
+  const [pendingFocusNodeId, setPendingFocusNodeId] = React.useState<string | null>(null)
+  const focusFlashTimerRef = React.useRef<number | null>(null)
 
   React.useEffect(() => {
     markReady()
@@ -201,6 +330,10 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
   zoomRef.current = zoom
   const nodesRef = React.useRef(nodes)
   nodesRef.current = nodes
+  const allNodesRef = React.useRef(allNodes)
+  allNodesRef.current = allNodes
+  const stageSizeRef = React.useRef(stageSize)
+  stageSizeRef.current = stageSize
 
   const scheduleOffset = React.useCallback((nextOffset: { x: number; y: number }) => {
     offsetRef.current = nextOffset
@@ -220,6 +353,85 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
       offsetFrameRef.current = null
     }
   }, [])
+
+  React.useEffect(() => {
+    const handleFocusNode = (event: Event) => {
+      const detail = (event as CustomEvent<{ nodeId?: unknown }>).detail
+      const nodeId = typeof detail?.nodeId === 'string' ? detail.nodeId : ''
+      if (!nodeId) return
+      const target = allNodesRef.current.find((node) => node.id === nodeId)
+      if (!target) {
+        toast('源节点已不存在', 'warning')
+        return
+      }
+      const targetCategoryId = target.categoryId || 'shots'
+      setActiveCategoryId(targetCategoryId)
+      selectNode(nodeId)
+      setPendingFocusNodeId(nodeId)
+    }
+    window.addEventListener(FOCUS_GENERATION_NODE_EVENT, handleFocusNode)
+    return () => {
+      window.removeEventListener(FOCUS_GENERATION_NODE_EVENT, handleFocusNode)
+      if (focusFlashTimerRef.current !== null) {
+        window.clearTimeout(focusFlashTimerRef.current)
+        focusFlashTimerRef.current = null
+      }
+    }
+  }, [selectNode, setActiveCategoryId])
+
+  React.useEffect(() => {
+    if (!pendingFocusNodeId) return
+    const target = allNodes.find((node) => node.id === pendingFocusNodeId)
+    if (!target) {
+      setPendingFocusNodeId(null)
+      return
+    }
+    const targetCategoryId = target.categoryId || 'shots'
+    if (targetCategoryId !== activeCategoryId) return
+    const targetZoom = categoryViewports[targetCategoryId]?.zoom || zoomRef.current || 1
+    const targetOffset = centerNodeOffset(target, stageSizeRef.current, targetZoom)
+    setZoom(targetZoom)
+    setOffset(targetOffset)
+    setFocusFlashNodeId(pendingFocusNodeId)
+    setPendingFocusNodeId(null)
+    if (focusFlashTimerRef.current !== null) window.clearTimeout(focusFlashTimerRef.current)
+    focusFlashTimerRef.current = window.setTimeout(() => {
+      setFocusFlashNodeId((current) => (current === pendingFocusNodeId ? null : current))
+      focusFlashTimerRef.current = null
+    }, 1400)
+  }, [activeCategoryId, allNodes, categoryViewports, pendingFocusNodeId])
+
+  React.useEffect(() => {
+    if (readOnly) return undefined
+    const handleMove = (event: PointerEvent) => {
+      const drag = draggingGroupRef.current
+      if (!drag) return
+      const scale = zoomRef.current || 1
+      const delta = {
+        x: (event.clientX - drag.clientX) / scale,
+        y: (event.clientY - drag.clientY) / scale,
+      }
+      if (delta.x === 0 && delta.y === 0) return
+      drag.clientX = event.clientX
+      drag.clientY = event.clientY
+      drag.moved = true
+      moveGroupNodes(drag.groupId, delta, { persist: false })
+    }
+    const handleUp = () => {
+      const drag = draggingGroupRef.current
+      if (!drag) return
+      draggingGroupRef.current = null
+      if (drag.moved) commitPersistedChange()
+    }
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleUp)
+    window.addEventListener('blur', handleUp)
+    return () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleUp)
+      window.removeEventListener('blur', handleUp)
+    }
+  }, [commitPersistedChange, moveGroupNodes, readOnly])
 
   // Keep store zoom in sync so BaseGenerationNode can read it
   React.useEffect(() => {
@@ -285,6 +497,31 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
     }
   }, [pendingConnectionSourceId, connectToNode, cancelConnection, readOnly])
 
+  const handleGroupSelectedNodes = React.useCallback(() => {
+    const group = groupSelectedNodes(activeCategoryId)
+    if (!group) return
+    toast(`已创建「${group.name}」`, 'success')
+  }, [activeCategoryId, groupSelectedNodes])
+
+  const handleUngroupSelectedNodes = React.useCallback(() => {
+    if (!selectedGroupIds.length) return
+    ungroupGroups(selectedGroupIds)
+    toast('已解组并保留节点', 'success')
+  }, [selectedGroupIds, ungroupGroups])
+
+  const handleGroupFramePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>, groupId: string) => {
+    if (readOnly || event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    captureHistory()
+    draggingGroupRef.current = {
+      groupId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      moved: false,
+    }
+  }, [captureHistory, readOnly])
+
   React.useEffect(() => {
     if (readOnly) return undefined
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -304,6 +541,24 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
         return
       }
       if (!mod) return
+      if (key === 'g' && event.shiftKey) {
+        if (!selectedGroupIds.length) return
+        event.preventDefault()
+        handleUngroupSelectedNodes()
+        return
+      }
+      if (key === 'g') {
+        if (selectedNodeIds.length < 2) return
+        event.preventDefault()
+        handleGroupSelectedNodes()
+        return
+      }
+      // v0.7.5: Cmd+A 全选当前分类
+      if (key === 'a') {
+        event.preventDefault()
+        useGenerationCanvasStore.getState().selectAllNodes(activeCategoryId)
+        return
+      }
       if (key === 'c') {
         event.preventDefault()
         copySelectedNodes()
@@ -336,7 +591,20 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [cancelConnection, copySelectedNodes, cutSelectedNodes, deleteSelectedNodes, pasteNodes, readOnly, redo, selectedNodeIds.length, undo])
+  }, [
+    cancelConnection,
+    copySelectedNodes,
+    cutSelectedNodes,
+    deleteSelectedNodes,
+    handleGroupSelectedNodes,
+    handleUngroupSelectedNodes,
+    pasteNodes,
+    readOnly,
+    redo,
+    selectedGroupIds.length,
+    selectedNodeIds.length,
+    undo,
+  ])
 
   React.useEffect(() => {
     const handleOpenSettings = () => {
@@ -370,17 +638,41 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
 
   const handleStageDrop = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
     if (readOnly) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const basePosition = {
+      x: (event.clientX - rect.left - offset.x) / zoom,
+      y: (event.clientY - rect.top - offset.y) / zoom,
+    }
+
+    // 1) 项目文件树拖入：文件已在项目里，直接用 nomi-local 协议引用，创建图片节点。
+    const workspaceDrag = parseWorkspaceFileDrag(event.dataTransfer.getData(WORKSPACE_FILE_DRAG_MIME))
+    if (workspaceDrag) {
+      event.preventDefault()
+      event.stopPropagation()
+      const url = buildWorkspaceFileUrl(workspaceDrag.projectId, workspaceDrag.relativePath)
+      const store = useGenerationCanvasStore.getState()
+      const node = store.addNode({
+        kind: 'asset',
+        title: workspaceDrag.name.replace(/\.[^.]+$/, '') || '本地素材',
+        prompt: '',
+        position: { x: Math.max(40, Math.round(basePosition.x)), y: Math.max(40, Math.round(basePosition.y)) },
+      })
+      const result = { id: `workspace-${node.id}-${Date.now()}`, type: 'image' as const, url, createdAt: Date.now() }
+      store.updateNode(node.id, {
+        result,
+        history: [result],
+        status: 'success',
+        meta: { ...(node.meta || {}), source: 'workspace-file', fileName: workspaceDrag.name, workspaceRelativePath: workspaceDrag.relativePath },
+      })
+      return
+    }
+
+    // 2) OS 文件拖入：复制进项目并上传，创建图片节点。
     const files = Array.from(event.dataTransfer.files || []).filter((file) => file.type.startsWith('image/'))
     if (!files.length) return
     event.preventDefault()
     event.stopPropagation()
-    const rect = event.currentTarget.getBoundingClientRect()
-    void importImageFilesToGenerationCanvas(files, {
-      basePosition: {
-        x: (event.clientX - rect.left - offset.x) / zoom,
-        y: (event.clientY - rect.top - offset.y) / zoom,
-      },
-    })
+    void importImageFilesToGenerationCanvas(files, { basePosition })
   }, [offset, readOnly, zoom])
 
   const handleStagePanStart = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -560,6 +852,9 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
   const zoomPercent = Math.round(zoom * 100)
   const selectedCount = selectedNodeIds.length
 
+  // E.2C-13: 删除 viewType 分支。5 个分类全部走同一画布底座。
+  // 节点渲染样式差异由 NodeRenderKind 分发（E.2C-14/15+ 实现）。
+
   return (
     <section
       className={cn(
@@ -651,7 +946,8 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
           onContextMenu={handleStageContextMenu}
           onDragOver={(event) => {
             if (readOnly) return
-            if (Array.from(event.dataTransfer.types).includes('Files')) {
+            const types = Array.from(event.dataTransfer.types)
+            if (types.includes('Files') || types.includes(WORKSPACE_FILE_DRAG_MIME)) {
               event.preventDefault()
               event.dataTransfer.dropEffect = 'copy'
             }
@@ -725,7 +1021,7 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
                               setActiveEdge(null)
                             }}
                           >
-                            <Scissors size={16} strokeWidth={2.2} aria-hidden="true" />
+                            <IconScissors size={16} stroke={2.2} aria-hidden="true" />
                           </button>
                         </div>
                       </foreignObject>
@@ -752,11 +1048,19 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
               })()}
             </svg>
             <div className={cn('generation-canvas-v2__nodes', 'absolute top-0 left-0 w-[4000px] h-[3000px]')}>
+              {/* E.2C-30: GroupFrame 抽离为独立组件 */}
+              <GroupFrameList boxes={groupBoxes} onPointerDown={handleGroupFramePointerDown} />
               <React.Suspense fallback={null}>
-                {nodes.map((node) => {
+                {visibleNodesForRender.map((node) => {
                   const NodeComponent = getGenerationNodeComponent(node.kind)
                   return (
-                    <NodeComponent key={node.id} node={node} selected={selectedSet.has(node.id)} readOnly={readOnly} />
+                    <NodeComponent
+                      key={node.id}
+                      node={node}
+                      selected={selectedSet.has(node.id)}
+                      readOnly={readOnly}
+                      focusFlash={focusFlashNodeId === node.id}
+                    />
                   )
                 })}
               </React.Suspense>
@@ -776,22 +1080,59 @@ export default function GenerationCanvas({ readOnly = false }: GenerationCanvasP
                 onPointerDown={(event) => event.stopPropagation()}
               >
                 <span className={cn('px-[6px] text-nomi-ink-60 text-[11px] whitespace-nowrap')}>{selectedCount} 个节点</span>
+                <WorkbenchIconButton label="创建分组 (⌘G)" icon={<IconFolderPlus size={14} />} onClick={handleGroupSelectedNodes} />
                 <WorkbenchIconButton label="复制选中节点" icon={<IconCopy size={14} />} onClick={copySelectedNodes} />
                 <WorkbenchIconButton label="剪切选中节点" icon={<IconCut size={14} />} onClick={cutSelectedNodes} />
                 <WorkbenchIconButton label="清除选择" icon={<IconX size={14} />} onClick={clearSelection} />
               </div>
             ) : null}
           </div>
-          {nodes.length === 0 ? (
-            <div className={cn(
-              'absolute top-[48%] left-1/2 grid gap-[6px]',
-              'text-workbench-muted text-[13px] text-center',
-              '-translate-x-1/2 -translate-y-1/2',
-            )}>
-              <strong>开始搭建生成链路</strong>
-              <span>添加文本、角色、图片或视频节点。</span>
-            </div>
-          ) : null}
+          {/* E.2C-24: 空状态 CTA（spec 决策 4）— 分类感知的引导按钮 */}
+          {nodes.length === 0 ? (() => {
+            const categoryNameById: Record<string, string> = {
+              shots: '画面',
+              cast: '角色',
+              scene: '场景',
+              prop: '道具',
+              audio: '声音',
+            }
+            const activeCategoryName = categoryNameById[activeCategoryId] || '节点'
+            const handleEmptyCtaClick = () => {
+              // 默认创建 image kind 节点（声音分类暂用 image 占位，audio kind 待 future iteration）
+              const newNode = addNode({
+                kind: 'image',
+                position: { x: 240, y: 240 },
+                select: true,
+              })
+              if (newNode && activeCategoryId) {
+                updateNode(newNode.id, { categoryId: activeCategoryId })
+              }
+            }
+            return (
+              <div className={cn(
+                'absolute top-[44%] left-1/2 grid gap-3 place-items-center',
+                'text-workbench-muted text-[13px] text-center',
+                '-translate-x-1/2 -translate-y-1/2',
+              )}>
+                <strong className="text-[14px] text-nomi-ink">这里还没有{activeCategoryName}</strong>
+                <span className="text-[12px] text-nomi-ink-60 max-w-[300px]">
+                  添加第一个节点开始创作，之后可以拖动、分组、跨分类复制。
+                </span>
+                <WorkbenchButton
+                  className={cn(
+                    'mt-2 inline-flex items-center gap-1.5 min-h-[28px] px-4',
+                    'rounded-full border-0 bg-nomi-ink text-nomi-paper',
+                    'font-[inherit] text-[12px] font-medium',
+                    'hover:enabled:bg-nomi-accent',
+                  )}
+                  aria-label={`新建一个${activeCategoryName}节点`}
+                  onClick={handleEmptyCtaClick}
+                >
+                  + 新建{activeCategoryName}
+                </WorkbenchButton>
+              </div>
+            )
+          })() : null}
           {selectionBox ? (
             <div
               className={cn(

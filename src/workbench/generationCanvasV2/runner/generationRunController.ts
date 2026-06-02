@@ -119,10 +119,100 @@ export async function runGenerationNode(
     await persistActiveWorkbenchProjectNow().catch(() => {})
     return result
   } catch (error: unknown) {
-    const message = error instanceof Error && error.message ? error.message : '生成失败'
-    useGenerationCanvasStore.getState().setNodeStatus(id, 'error', message)
+    const rawMessage = error instanceof Error && error.message ? error.message : '生成失败'
+    // v0.7.5: 错误信息友好化 — 给常见 API 错误加 hint
+    const friendlyMessage = enrichGenerationError(rawMessage)
+    useGenerationCanvasStore.getState().setNodeStatus(id, 'error', friendlyMessage)
     throw error
   }
+}
+
+/**
+ * 把底层 API 错误转成用户能行动的文案。
+ * 常见情况：API key 缺失/无效、模型未配置、配额耗尽、网络问题、超时。
+ */
+function enrichGenerationError(message: string): string {
+  const lower = message.toLowerCase()
+  if (lower.includes('api key') || lower.includes('apikey') || lower.includes('unauthorized') || lower.includes('401')) {
+    return `${message}\n→ 请在「模型接入」页检查 API Key`
+  }
+  if (lower.includes('quota') || lower.includes('rate limit') || lower.includes('429') || lower.includes('insufficient')) {
+    return `${message}\n→ 服务商配额或限流，请稍后重试或更换模型`
+  }
+  if (lower.includes('timeout') || lower.includes('etimedout') || lower.includes('econnreset') || lower.includes('network')) {
+    return `${message}\n→ 网络问题，请检查网络后重试`
+  }
+  if (lower.includes('model') && (lower.includes('not found') || lower.includes('未找到') || lower.includes('not configured'))) {
+    return `${message}\n→ 模型未配置，请去「模型接入」页设置`
+  }
+  if (lower.includes('content') && (lower.includes('policy') || lower.includes('safety') || lower.includes('filter'))) {
+    return `${message}\n→ 提示词被安全策略拦截，请修改后重试`
+  }
+  return message
+}
+
+export type RunGenerationNodesBatchOptions = RunGenerationNodeOptions & {
+  /** Maximum concurrent runs. Defaults to 2 so two nodes can execute in parallel without overwhelming the provider. */
+  concurrency?: number
+  /** Called whenever a node finishes (success or failure) so the UI can update progress. */
+  onNodeResult?: (event:
+    | { ok: true; nodeId: string; result: GenerationNodeResult }
+    | { ok: false; nodeId: string; error: Error }
+  ) => void
+}
+
+export type RunGenerationNodesBatchResult = {
+  totalCount: number
+  successes: Array<{ nodeId: string; result: GenerationNodeResult }>
+  failures: Array<{ nodeId: string; error: Error }>
+}
+
+function normalizeConcurrency(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 2
+  return Math.max(1, Math.min(4, Math.floor(value)))
+}
+
+/**
+ * Run a batch of generation nodes with bounded concurrency. Each node
+ * goes through the same retry/failure semantics as `runGenerationNode`,
+ * so callers can still display a per-node retry button if a run fails.
+ * This is the runtime used by the storyboard demo's "全部生成" action.
+ */
+export async function runGenerationNodesBatch(
+  nodeIds: readonly string[],
+  options: RunGenerationNodesBatchOptions = {},
+): Promise<RunGenerationNodesBatchResult> {
+  const queue = nodeIds
+    .map((value) => String(value || '').trim())
+    .filter((value, index, array) => Boolean(value) && array.indexOf(value) === index)
+  const concurrency = normalizeConcurrency(options.concurrency)
+  const successes: RunGenerationNodesBatchResult['successes'] = []
+  const failures: RunGenerationNodesBatchResult['failures'] = []
+  let cursor = 0
+
+  async function worker(): Promise<void> {
+    while (cursor < queue.length) {
+      const nextIndex = cursor
+      cursor += 1
+      const nodeId = queue[nextIndex]
+      try {
+        const result = await runGenerationNode(nodeId, {
+          executor: options.executor,
+          retry: options.retry,
+        })
+        successes.push({ nodeId, result })
+        options.onNodeResult?.({ ok: true, nodeId, result })
+      } catch (error: unknown) {
+        const normalizedError = error instanceof Error ? error : new Error(String(error))
+        failures.push({ nodeId, error: normalizedError })
+        options.onNodeResult?.({ ok: false, nodeId, error: normalizedError })
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
+  await Promise.all(workers)
+  return { totalCount: queue.length, successes, failures }
 }
 
 export async function rerunGenerationNodeAsNewNode(

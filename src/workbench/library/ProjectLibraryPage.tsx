@@ -1,13 +1,73 @@
-import { IconTrash } from '@tabler/icons-react'
+import React from 'react'
+import { IconFolderOpen, IconMovie, IconSparkles, IconTrash } from '@tabler/icons-react'
 import { cn } from '../../utils/cn'
 import { NomiLogoMark } from '../../design'
 import type { LocalProjectSummary } from './localProjectStore'
+import { TRY_NOW_EXAMPLES, type TryNowExample } from './tryNowExamples'
+import { PROJECT_TEMPLATE_LIST, type ProjectTemplateId } from './projectTemplates'
 
 type Props = {
   onOpenProject: (projectId: string) => void
   onDeleteProject: (project: LocalProjectSummary) => void
-  onNewProject: () => void
+  onNewProject: (templateId?: ProjectTemplateId) => void
+  onOpenFolder?: () => void
+  onTryExample?: (example: TryNowExample) => void
   projects: LocalProjectSummary[]
+}
+
+function TemplatePickerModal({
+  open,
+  onCancel,
+  onPick,
+}: {
+  open: boolean
+  onCancel: () => void
+  onPick: (id: ProjectTemplateId) => void
+}): JSX.Element | null {
+  if (!open) return null
+  return (
+    <div
+      className="fixed inset-0 z-[200] grid place-items-center bg-black/30 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="选择项目模板"
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-[640px] bg-nomi-paper border border-nomi-line rounded-nomi-lg shadow-nomi-md p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-[18px] font-medium text-nomi-ink m-0">选择项目模板</h2>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-nomi-ink-40 hover:text-nomi-ink text-[20px] leading-none"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <div className="grid gap-3">
+          {PROJECT_TEMPLATE_LIST.map((tpl) => (
+            <button
+              type="button"
+              key={tpl.id}
+              onClick={() => onPick(tpl.id)}
+              className={cn(
+                'text-left px-4 py-3 border border-nomi-line rounded-nomi-md',
+                'bg-nomi-bg hover:bg-nomi-paper hover:border-nomi-accent/40 hover:shadow-nomi-sm',
+                'transition-colors duration-150',
+              )}
+            >
+              <div className="text-[14px] font-medium text-nomi-ink mb-1">{tpl.name}</div>
+              <div className="text-[12px] text-nomi-ink-40 leading-snug">{tpl.description}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function formatUpdatedAt(value: number): string {
@@ -45,13 +105,18 @@ function ThumbnailMosaic({ urls }: { urls: string[] }): JSX.Element {
   )
 }
 
-export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onNewProject, projects }: Props): JSX.Element {
+export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onNewProject, onOpenFolder, onTryExample, projects }: Props): JSX.Element {
+  const [query, setQuery] = React.useState('')
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredProjects = normalizedQuery
+    ? projects.filter((project) => project.name.toLowerCase().includes(normalizedQuery))
+    : projects
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-nomi-bg text-nomi-ink font-nomi-sans text-[13px] leading-normal antialiased">
       <main className="flex-1 overflow-y-auto px-14 pt-[60px] pb-20 flex flex-col gap-5">
 
         {/* ── Header ── */}
-        <section className="flex flex-col gap-2 mb-3">
+        <section className="shrink-0 flex flex-col gap-2 mb-3">
           <h1 className="flex items-center gap-[11px] font-nomi-display text-[28px] font-normal tracking-[-0.022em] text-nomi-ink leading-none m-0">
             <NomiLogoMark size={28} />
             <span>No<span className="text-nomi-accent">m</span>i 项目库</span>
@@ -59,9 +124,61 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
           <p className="m-0 pl-[39px] text-[13px] text-nomi-ink-40">新建一个项目，开始把你的创意变成作品。</p>
         </section>
 
+        {/* ── Try Now hero ── */}
+        {onTryExample ? (
+          <section
+            className={cn(
+              'shrink-0 relative flex flex-col gap-3 px-5 py-[18px] mb-4',
+              'border border-nomi-line rounded-nomi-lg bg-nomi-paper shadow-nomi-sm overflow-hidden',
+            )}
+            data-try-now-hero="true"
+            aria-label="30 秒体验 Nomi 故事板"
+          >
+            <div className="flex items-center gap-2 text-nomi-accent text-[11.5px] font-medium uppercase tracking-wider">
+              <IconSparkles size={14} />
+              <span>30 秒体验 Nomi</span>
+            </div>
+            <div className="flex flex-col gap-1">
+              <h2 className="m-0 font-nomi-display text-[20px] font-normal tracking-[-0.018em] text-nomi-ink leading-snug">
+                把一段故事，自动拆成 6-12 个镜头
+              </h2>
+              <p className="m-0 text-[12.5px] text-nomi-ink-60 leading-relaxed">
+                选一个示例，Nomi 会新建项目、填入故事文本，并自动调用 Agent 拆镜头 → 画布上看到一整排可生成的镜头节点。
+              </p>
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2 mt-1">
+              {TRY_NOW_EXAMPLES.map((example) => (
+                <button
+                  key={example.id}
+                  type="button"
+                  className={cn(
+                    'group flex items-center gap-3 px-3 py-[10px] border border-nomi-line rounded-nomi-sm',
+                    'bg-nomi-bg text-left font-inherit cursor-pointer',
+                    'transition-[background,border-color,box-shadow] duration-150',
+                    'hover:bg-[color-mix(in_oklch,var(--nomi-accent)_6%,var(--nomi-bg))]',
+                    'hover:border-[color-mix(in_oklch,var(--nomi-accent)_40%,transparent)]',
+                  )}
+                  data-try-now-example-id={example.id}
+                  onClick={() => onTryExample(example)}
+                >
+                  <span className={cn(
+                    'shrink-0 inline-grid place-items-center w-9 h-9 rounded-nomi-sm',
+                    'bg-nomi-paper border border-nomi-line text-[18px]',
+                  )} aria-hidden="true">{example.emoji}</span>
+                  <span className="flex-1 min-w-0 flex flex-col gap-[2px]">
+                    <span className="text-[13px] font-medium text-nomi-ink truncate group-hover:text-nomi-accent">{example.label}</span>
+                    <span className="text-[11.5px] text-nomi-ink-60 truncate">{example.subtitle}</span>
+                  </span>
+                  <IconMovie size={15} className="shrink-0 text-nomi-ink-40 group-hover:text-nomi-accent" />
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         {/* ── Search ── */}
         <div className={cn(
-          'flex items-center gap-2 h-9 max-w-[360px] px-3',
+          'shrink-0 flex items-center gap-2 h-9 max-w-[360px] px-3',
           'border border-nomi-line rounded-nomi-sm bg-nomi-paper',
           'transition-[border-color,box-shadow] duration-150',
           'focus-within:border-[color-mix(in_oklch,var(--nomi-accent)_50%,transparent)]',
@@ -75,11 +192,13 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
             type="search"
             placeholder="搜索项目名称…"
             aria-label="搜索项目"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
           />
         </div>
 
         {/* ── Grid ── */}
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-[14px]">
+        <div className="shrink-0 grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-[14px]">
 
           {/* New project — first card, plain solid style */}
           <button
@@ -90,7 +209,7 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
               'active:translate-y-0 active:shadow-none',
             )}
             type="button"
-            onClick={onNewProject}
+            onClick={() => onNewProject()}
           >
             <div className={cn(
               'aspect-video relative overflow-hidden',
@@ -115,7 +234,41 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
             </div>
           </button>
 
-          {projects.map((project) => {
+          {onOpenFolder ? (
+            <button
+              className={cn(
+                'group bg-nomi-paper border border-nomi-line rounded-nomi-lg overflow-hidden cursor-pointer text-left font-inherit',
+                'transition-[box-shadow,transform,border-color] duration-150',
+                'hover:shadow-nomi-md hover:border-[var(--nomi-ink-20)] hover:-translate-y-0.5',
+                'active:translate-y-0 active:shadow-none',
+              )}
+              type="button"
+              onClick={onOpenFolder}
+            >
+              <div className={cn(
+                'aspect-video relative overflow-hidden',
+                'flex items-center justify-center bg-nomi-bg transition-colors duration-150',
+                'group-hover:bg-[color-mix(in_oklch,var(--nomi-accent)_6%,var(--nomi-bg))]',
+              )}>
+                <div className={cn(
+                  'w-10 h-10 rounded-full bg-nomi-paper border border-nomi-line',
+                  'grid place-items-center text-nomi-ink-40',
+                  'transition-[border-color,color,background] duration-150',
+                  'group-hover:bg-[color-mix(in_oklch,var(--nomi-accent)_10%,var(--nomi-paper))]',
+                  'group-hover:border-[color-mix(in_oklch,var(--nomi-accent)_40%,transparent)]',
+                  'group-hover:text-nomi-accent',
+                )}>
+                  <IconFolderOpen size={21} stroke={1.8} aria-hidden="true" />
+                </div>
+              </div>
+              <div className="px-[13px] pt-[10px] pb-3">
+                <div className="text-[13px] font-medium text-nomi-ink-60 truncate mb-0.5 group-hover:text-nomi-accent">打开文件夹</div>
+                <div className="text-[11.5px] text-nomi-ink-40 truncate">选择已有目录作为项目空间</div>
+              </div>
+            </button>
+          ) : null}
+
+          {filteredProjects.map((project) => {
             const urls = project.thumbnailUrls || (project.thumbnail ? [project.thumbnail] : [])
             return (
               <div

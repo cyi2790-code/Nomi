@@ -21,9 +21,21 @@ export const WORKSPACE_MODES = ['creation', 'generation', 'preview'] as const
 
 export type WorkspaceMode = (typeof WORKSPACE_MODES)[number]
 
+type GraphViewport = { zoom: number; offset: { x: number; y: number } }
+
 type WorkbenchState = {
   persistRevision: number
   workspaceMode: WorkspaceMode
+  /** Phase E: which directory-tree category is currently selected */
+  activeCategoryId: string
+  /** Phase E: collapsed (icon-only) vs expanded sidebar */
+  sidebarCollapsed: boolean
+  /** Phase E: viewport (zoom + offset) per graph-canvas-type category */
+  categoryViewports: Record<string, GraphViewport>
+  setActiveCategoryId: (id: string) => void
+  toggleSidebarCollapsed: () => void
+  setSidebarCollapsed: (collapsed: boolean) => void
+  rememberCategoryViewport: (categoryId: string, viewport: GraphViewport) => void
   workbenchDocument: WorkbenchDocument
   creationDocumentTools: CreationDocumentTools | null
   creationSelectionText: string
@@ -67,10 +79,32 @@ export function isWorkspaceMode(value: unknown): value is WorkspaceMode {
 export const useWorkbenchStore = create<WorkbenchState>()(subscribeWithSelector((set) => ({
   persistRevision: 0,
   workspaceMode: 'generation',
+  activeCategoryId: 'shots',
+  sidebarCollapsed: true,
+  categoryViewports: {},
+  setActiveCategoryId: (id) => {
+    if (typeof id !== 'string' || !id.trim()) return
+    set({ activeCategoryId: id })
+  },
+  toggleSidebarCollapsed: () => {
+    set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed }))
+  },
+  setSidebarCollapsed: (sidebarCollapsed) => {
+    set({ sidebarCollapsed: Boolean(sidebarCollapsed) })
+  },
+  rememberCategoryViewport: (categoryId, viewport) => {
+    if (!categoryId) return
+    set((state) => ({
+      categoryViewports: {
+        ...state.categoryViewports,
+        [categoryId]: viewport,
+      },
+    }))
+  },
   workbenchDocument: createDefaultWorkbenchDocument(),
   creationDocumentTools: null,
   creationSelectionText: '',
-  creationAiModeId: 'story',
+  creationAiModeId: 'general',
   creationAiDraft: '',
   creationAiMessages: [],
   creationAiError: '',

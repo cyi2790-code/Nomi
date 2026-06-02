@@ -1,12 +1,27 @@
 import { z } from 'zod'
-import { generationCanvasSnapshotSchema } from '../generationCanvasV2/model/generationCanvasSchema'
+
 import { createDefaultTimeline } from '../timeline/timelineMath'
 import type { TimelineState } from '../timeline/timelineTypes'
 import { createDefaultWorkbenchDocument, type WorkbenchDocument } from '../workbenchTypes'
 import { createDefaultGenerationCanvasSnapshot } from '../generationCanvasV2/store/generationCanvasDefaults'
 import type { GenerationCanvasSnapshot } from '../generationCanvasV2/model/generationCanvasTypes'
+import { cloneBuiltinCategories, projectCategorySchema, type ProjectCategory } from './projectCategories'
 
-export const workbenchProjectRecordVersionSchema = z.literal(1)
+// Persisted records come in two shapes that carry an identical `payload`:
+//   v1 = legacy single-file project.json
+//   v2 = workspace folder manifest (.nomi/project.json), adds lastKnownRootPath
+// The renderer keeps a single in-memory representation (version 1); both
+// persisted versions normalize into it, so we accept either tag here.
+export const workbenchProjectRecordVersionSchema = z
+  .union([z.literal(1), z.literal(2)])
+  .transform(() => 1 as const)
+
+const workbenchProjectGenerationCanvasPayloadSchema = z.object({
+  nodes: z.array(z.unknown()),
+  edges: z.array(z.unknown()).default([]),
+  selectedNodeIds: z.array(z.string()).default([]),
+  groups: z.array(z.unknown()).optional(),
+}).passthrough().transform((value) => value as GenerationCanvasSnapshot)
 
 export const workbenchProjectSummarySchema = z.object({
   id: z.string().min(1),
@@ -39,7 +54,10 @@ export const workbenchProjectPayloadSchema = z.object({
       clips: z.array(z.unknown().refine((value) => value !== undefined, 'clip is required')),
     })),
   }),
-  generationCanvas: generationCanvasSnapshotSchema,
+  // Keep project loading tolerant of legacy v0.5 category ids so the
+  // v5→v6 migration can run before the stricter canvas schema is enforced.
+  generationCanvas: workbenchProjectGenerationCanvasPayloadSchema,
+  categories: z.array(projectCategorySchema).optional(),
 })
 
 export const workbenchProjectRecordSchema = workbenchProjectSummarySchema.extend({
@@ -63,6 +81,7 @@ export type WorkbenchProjectPayload = {
   workbenchDocument: WorkbenchDocument
   timeline: TimelineState
   generationCanvas: GenerationCanvasSnapshot
+  categories?: ProjectCategory[]
 }
 
 export type WorkbenchProjectRecordV1 = WorkbenchProjectSummary & {
@@ -86,5 +105,6 @@ export function createDefaultWorkbenchProjectPayload(): WorkbenchProjectPayload 
     workbenchDocument: createDefaultWorkbenchDocument(),
     timeline: createDefaultTimeline(),
     generationCanvas: createDefaultGenerationCanvasSnapshot(),
+    categories: cloneBuiltinCategories(),
   }
 }

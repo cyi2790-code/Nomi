@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { CATEGORY_IDS } from './generationCanvasTypes'
 import { GENERATION_NODE_KINDS } from './generationNodeKinds'
 
 export const generationNodeKindSchema = z.enum(GENERATION_NODE_KINDS)
@@ -6,6 +7,7 @@ export const generationNodeKindSchema = z.enum(GENERATION_NODE_KINDS)
 export const generationNodeStatusSchema = z.enum(['idle', 'queued', 'running', 'success', 'error'])
 export const generationNodeTaskKindSchema = z.enum(['text', 'image', 'video', 'workflow', 'asset', 'unknown'])
 export const generationNodeRunStatusSchema = z.enum(['queued', 'running', 'success', 'error', 'cancelled'])
+export const categoryIdSchema = z.enum(CATEGORY_IDS)
 
 export const generationNodeProgressSchema = z.object({
   runId: z.string().optional(),
@@ -16,6 +18,19 @@ export const generationNodeProgressSchema = z.object({
   percent: z.number().optional(),
   updatedAt: z.number(),
 })
+
+export const generationProvenanceSchema = z.object({
+  provider: z.string().optional(),
+  modelKey: z.string().optional(),
+  modelVersion: z.string().optional(),
+  prompt: z.string().optional(),
+  negativePrompt: z.string().optional(),
+  seed: z.number().optional(),
+  params: z.record(z.unknown()).optional(),
+  vendorRequestId: z.string().optional(),
+  timestamp: z.number(),
+  agentRunId: z.string().optional(),
+}).strict()
 
 export const generationNodeResultSchema = z.object({
   id: z.string().min(1),
@@ -31,6 +46,7 @@ export const generationNodeResultSchema = z.object({
   assetRefId: z.string().optional(),
   raw: z.unknown().optional(),
   createdAt: z.number(),
+  provenance: generationProvenanceSchema.optional(),
 })
 
 export const generationNodeRunRecordSchema = z.object({
@@ -71,6 +87,32 @@ export const generationCanvasNodeSchema = z.object({
   status: generationNodeStatusSchema.optional(),
   error: z.string().optional(),
   meta: z.record(z.unknown()).optional(),
+  categoryId: categoryIdSchema.optional(),
+  groupId: z.string().optional(),
+  derivedFrom: z.string().optional(),
+  // E.2C-15 新增字段
+  regeneratedFrom: z.string().optional(),
+  shotIndex: z.number().int().nonnegative().optional(),
+  renderKind: z
+    .enum(['shot-frame', 'character-card', 'scene-card', 'prop-card', 'audio-strip'])
+    .optional(),
+})
+
+export const nodeGroupSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  categoryId: categoryIdSchema,
+  nodeIds: z.array(z.string()),
+  color: z.string().optional(),
+  frameBounds: z.object({
+    x: z.number(),
+    y: z.number(),
+    w: z.number(),
+    h: z.number(),
+  }).optional(),
+  collapsed: z.boolean().optional(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
 })
 
 export const generationCanvasEdgeSchema = z.object({
@@ -91,4 +133,5 @@ export const generationCanvasSnapshotSchema = z.object({
   nodes: z.array(generationCanvasNodeSchema),
   edges: z.array(generationCanvasEdgeSchema),
   selectedNodeIds: z.array(z.string()),
+  groups: z.array(nodeGroupSchema).default([]),
 })

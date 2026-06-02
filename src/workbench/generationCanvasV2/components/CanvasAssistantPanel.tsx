@@ -2,13 +2,63 @@ import { IconSend2, IconX } from '@tabler/icons-react'
 import { NomiAILabel, WorkbenchButton, WorkbenchIconButton } from '../../../design'
 import React from 'react'
 import { cn } from '../../../utils/cn'
-import { buildPlannedEdges, toCreateNodeInputs } from '../agent/generationCanvasAgentPlan'
-import { sendGenerationCanvasAgentMessage } from '../agent/generationCanvasAgentClient'
+import {
+  sendGenerationCanvasAgentMessage,
+  type ToolCallEvent,
+} from '../agent/generationCanvasAgentClient'
 import { generationCanvasTools } from '../agent/generationCanvasTools'
+import {
+  buildStoryboardPlanningMessage,
+  STORYBOARD_PLANNER_SKILL,
+  STORYBOARD_PLANNING_EVENT,
+  type StoryboardPlanningRequest,
+} from '../agent/storyboardLauncher'
+import AgentPlanCard, { summarizeAgentPlan } from './AgentPlanCard'
+import { getGenerationNodeDefaultTitle } from '../model/generationNodeKinds'
+import type { GenerationNodeKind } from '../model/generationCanvasTypes'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'
 import { AiReplyActionButton } from '../../ai/AiReplyActionButton'
 import { handleAiComposerKeyDown } from '../../ai/aiComposerKeyboard'
 import { openWorkbenchModelIntegration, WorkbenchAiHeaderActions } from '../../ai/WorkbenchAiHeaderActions'
+
+type PendingToolCall = {
+  toolCallId: string
+  toolName: string
+  args: unknown
+  /**
+   * Confirm or reject the pending tool call. `overrides` lets the UI
+   * patch the args before they are applied — used by the plan card so a
+   * user-edited prompt overrides the agent's original suggestion.
+   */
+  confirm: (
+    decision: { ok: true; result?: unknown } | { ok: false; message?: string },
+    overrides?: Record<string, unknown>,
+  ) => Promise<void>
+}
+
+function summarizeToolCall(toolName: string, args: unknown): string {
+  const record = (args && typeof args === 'object') ? args as Record<string, unknown> : {}
+  if (toolName === 'create_canvas_nodes') {
+    const nodes = Array.isArray(record.nodes) ? record.nodes : []
+    const summary = typeof record.summary === 'string' ? record.summary : ''
+    return `创建 ${nodes.length} 个节点${summary ? `：${summary}` : ''}`
+  }
+  if (toolName === 'connect_canvas_edges') {
+    const edges = Array.isArray(record.edges) ? record.edges : []
+    return `连接 ${edges.length} 条边`
+  }
+  if (toolName === 'set_node_prompt') {
+    return `改写节点 ${String(record.nodeId || '')} 的提示词`
+  }
+  if (toolName === 'delete_canvas_nodes') {
+    const ids = Array.isArray(record.nodeIds) ? record.nodeIds : []
+    return `删除 ${ids.length} 个节点`
+  }
+  if (toolName === 'read_canvas_state') {
+    return '读取画布当前状态'
+  }
+  return `${toolName}`
+}
 
 type CanvasAssistantPanelProps = {
   defaultCollapsed?: boolean
@@ -30,6 +80,29 @@ export default function CanvasAssistantPanel({
   const selectedNodes = React.useMemo(() => generationCanvasTools.read_selected_nodes(), [nodes, selectedNodeIds])
   const [busy, setBusy] = React.useState(false)
   const [mode, setMode] = React.useState<'agent' | 'chat' | 'refine'>('agent')
+  const [pendingToolCalls, setPendingToolCalls] = React.useState<PendingToolCall[]>([])
+  const threadBottomRef = React.useRef<HTMLDivElement | null>(null)
+
+  const resolvePending = React.useCallback((
+    toolCallId: string,
+    decision: { ok: true; result?: unknown } | { ok: false; message?: string },
+    overrides?: Record<string, unknown>,
+  ) => {
+    setPendingToolCalls((current) => {
+      const target = current.find((item) => item.toolCallId === toolCallId)
+      if (target) void target.confirm(decision, overrides)
+      return current.filter((item) => item.toolCallId !== toolCallId)
+    })
+  }, [])
+
+  // Exposed for the V2 agent client (wired in B6) so the panel can render
+  // pending tool calls and forward the user's confirmation back to the IPC
+  // session. We surface it via a ref so the call site doesn't have to
+  // re-render on every state change.
+  const pendingToolCallsRef = React.useRef({
+    enqueue: (call: PendingToolCall) => setPendingToolCalls((current) => [...current, call]),
+    clear: () => setPendingToolCalls([]),
+  })
   const draft = useGenerationCanvasStore((state) => state.generationAiDraft)
   const messages = useGenerationCanvasStore((state) => state.generationAiMessages)
   const collapsed = useGenerationCanvasStore((state) => state.generationAiCollapsed)
@@ -46,6 +119,14 @@ export default function CanvasAssistantPanel({
     onCollapsedChange?.(collapsed)
   }, [collapsed, onCollapsedChange])
 
+  // Keep the newest reply / pending plan card in view. Without this the
+  // thread stays scrolled to the top and a fresh reply (or a tool-call card)
+  // looks like it landed "above" the conversation.
+  React.useEffect(() => {
+    if (collapsed) return
+    threadBottomRef.current?.scrollIntoView({ block: 'end' })
+  }, [messages, pendingToolCalls, collapsed])
+
   const appendMessage = React.useCallback((message: { role: 'assistant' | 'user' | 'tool'; content: string }) => {
     setMessages((current) => [...current, { id: createMessageId(), ...message }])
   }, [setMessages])
@@ -56,12 +137,78 @@ export default function CanvasAssistantPanel({
     )))
   }, [setMessages])
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const text = draft.trim()
+  /**
+   * Apply a confirmed tool call by routing through the renderer-side
+   * generationCanvasTools store. Returns a structured result that we feed
+   * back to the LLM. Phase B left this referenced but undefined; C2/C3
+   * fills the gap so the confirmation card can actually mutate the canvas.
+   */
+  const applyConfirmedToolCall = React.useCallback(async (toolName: string, args: unknown): Promise<unknown> => {
+    const record = (args && typeof args === 'object') ? args as Record<string, unknown> : {}
+    if (toolName === 'create_canvas_nodes') {
+      const incoming = Array.isArray(record.nodes) ? record.nodes : []
+      const inputs = incoming.map((raw, index) => {
+        const node = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {}
+        const kind = (typeof node.kind === 'string' ? node.kind : 'image') as GenerationNodeKind
+        const positionRecord = (node.position && typeof node.position === 'object') ? node.position as Record<string, unknown> : null
+        return {
+          kind,
+          title: typeof node.title === 'string' && node.title.trim()
+            ? node.title.trim()
+            : `${getGenerationNodeDefaultTitle(kind)} ${index + 1}`,
+          prompt: typeof node.prompt === 'string' ? node.prompt : '',
+          position: {
+            x: typeof positionRecord?.x === 'number' ? positionRecord.x : 160 + index * 340,
+            y: typeof positionRecord?.y === 'number' ? positionRecord.y : 260 + (index % 2) * 220,
+          },
+        }
+      })
+      const created = generationCanvasTools.create_nodes(inputs)
+      const clientIdToNodeId: Record<string, string> = {}
+      incoming.forEach((raw, index) => {
+        const node = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {}
+        const clientId = typeof node.clientId === 'string' ? node.clientId : ''
+        if (clientId && created[index]) clientIdToNodeId[clientId] = created[index].id
+      })
+      return {
+        createdNodeIds: created.map((node) => node.id),
+        clientIdToNodeId,
+      }
+    }
+    if (toolName === 'connect_canvas_edges') {
+      const rawEdges = Array.isArray(record.edges) ? record.edges : []
+      const edges = rawEdges
+        .map((raw) => (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {})
+        .map((edge) => ({
+          source: String(edge.sourceClientId || edge.source || '').trim(),
+          target: String(edge.targetClientId || edge.target || '').trim(),
+        }))
+        .filter((edge) => edge.source && edge.target)
+      if (edges.length > 0) generationCanvasTools.connect_nodes(edges)
+      return { connectedCount: edges.length }
+    }
+    if (toolName === 'set_node_prompt') {
+      const nodeId = String(record.nodeId || '').trim()
+      const prompt = typeof record.prompt === 'string' ? record.prompt : ''
+      const node = generationCanvasTools.update_node_prompt(nodeId, prompt)
+      if (!node) throw new Error('node_not_found')
+      return { nodeId: node.id }
+    }
+    if (toolName === 'delete_canvas_nodes') {
+      throw new Error('delete_canvas_nodes is not yet implemented')
+    }
+    throw new Error(`unknown tool ${toolName}`)
+  }, [])
+
+  type SubmitMessageOptions = {
+    skill?: { key: string; name: string }
+    displayMessage?: string
+  }
+
+  const submitAgentMessage = React.useCallback((text: string, options: SubmitMessageOptions = {}) => {
     if (!text || busy) return
     setDraft('')
-    appendMessage({ role: 'user', content: text })
+    appendMessage({ role: 'user', content: options.displayMessage || text })
     const assistantMessageId = createMessageId()
     setMessages((current) => [
       ...current,
@@ -69,47 +216,61 @@ export default function CanvasAssistantPanel({
     ])
     setBusy(true)
     void (async () => {
+      let toolActionCount = 0
       try {
         const result = await sendGenerationCanvasAgentMessage({
           message: text,
           snapshot,
           selectedNodes,
           mode,
+          skill: options.skill,
           onContent: (_delta, streamedText) => {
-            if (mode === 'chat') updateMessage(assistantMessageId, streamedText || '处理中...')
+            updateMessage(assistantMessageId, streamedText || '处理中...')
+          },
+          onToolCall: (event: ToolCallEvent) => {
+            // Read-only tools auto-execute without user interaction.
+            if (event.toolName === 'read_canvas_state') {
+              const snap = generationCanvasTools.read_canvas()
+              void event.confirm({ ok: true, result: snap })
+              return
+            }
+            // Destructive / state-changing tools wait for explicit user
+            // approval through the pending tool-call card.
+            pendingToolCallsRef.current.enqueue({
+              toolCallId: event.toolCallId,
+              toolName: event.toolName,
+              args: event.args,
+              confirm: async (decision, overrides) => {
+                if (decision.ok) {
+                  const baseArgs = (event.args && typeof event.args === 'object')
+                    ? event.args as Record<string, unknown>
+                    : {}
+                  const effectiveArgs = overrides ? { ...baseArgs, ...overrides } : baseArgs
+                  try {
+                    const result = await applyConfirmedToolCall(event.toolName, effectiveArgs)
+                    toolActionCount += 1
+                    await event.confirm({ ok: true, result })
+                  } catch (error: unknown) {
+                    const message = error instanceof Error && error.message ? error.message : String(error)
+                    await event.confirm({ ok: false, message })
+                  }
+                } else {
+                  await event.confirm(decision)
+                }
+              },
+            })
           },
         })
 
-        if (mode === 'chat') {
-          updateMessage(assistantMessageId, result.response.text || '已回答。')
-          return
+        const finalText = result.response.text?.trim() || ''
+        if (toolActionCount > 0) {
+          updateMessage(
+            assistantMessageId,
+            `${finalText ? finalText + '\n\n' : ''}已执行 ${toolActionCount} 个工具调用。`,
+          )
+        } else {
+          updateMessage(assistantMessageId, finalText || '已完成。')
         }
-
-        if (mode === 'refine') {
-          const plan = result.plan
-          if (plan?.nodes.length && selectedNodes.length > 0) {
-            const firstNode = plan.nodes[0]
-            if (firstNode?.prompt) {
-              generationCanvasTools.update_node_prompt(selectedNodes[0].id, firstNode.prompt)
-              updateMessage(assistantMessageId, '已更新选中节点的提示词。')
-              return
-            }
-          }
-          updateMessage(assistantMessageId, result.response.text || '润色完成。')
-          return
-        }
-
-        if (!result.plan) {
-          throw new Error('生成区 Agent 没有返回节点计划。')
-        }
-        const nodeInputs = toCreateNodeInputs(result.plan)
-        const createdNodes = generationCanvasTools.create_nodes(nodeInputs)
-        const edges = buildPlannedEdges(result.plan, createdNodes.map((node) => node.id))
-        if (edges.length > 0) generationCanvasTools.connect_nodes(edges)
-        updateMessage(
-          assistantMessageId,
-          `已创建 ${createdNodes.length} 个待确认节点${edges.length > 0 ? `，并连接 ${edges.length} 条关系` : ''}。你可以先检查提示词，再点击节点上的生成按钮。`,
-        )
       } catch (error: unknown) {
         updateMessage(
           assistantMessageId,
@@ -119,7 +280,33 @@ export default function CanvasAssistantPanel({
         setBusy(false)
       }
     })()
+  }, [appendMessage, applyConfirmedToolCall, busy, mode, selectedNodes, setDraft, setMessages, snapshot, updateMessage])
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    submitAgentMessage(draft.trim())
   }
+
+  // Listen for "Story → Storyboard" requests dispatched from the creation
+  // editor (C2) or the project library "Try Now" hero (C6). The panel
+  // expands, drops the user's story into the chat thread, and runs the
+  // storyboard-planner skill which will trigger create_canvas_nodes +
+  // connect_canvas_edges tool calls.
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<StoryboardPlanningRequest>).detail
+      const storyText = detail?.storyText?.trim() || ''
+      if (!storyText) return
+      setCollapsed(false)
+      const message = buildStoryboardPlanningMessage(storyText)
+      submitAgentMessage(message, {
+        skill: STORYBOARD_PLANNER_SKILL,
+        displayMessage: `🎬 拆镜头\n\n${storyText}`,
+      })
+    }
+    window.addEventListener(STORYBOARD_PLANNING_EVENT, handler as EventListener)
+    return () => window.removeEventListener(STORYBOARD_PLANNING_EVENT, handler as EventListener)
+  }, [setCollapsed, submitAgentMessage])
 
   const handleNewConversation = React.useCallback(() => {
     resetConversation()
@@ -200,7 +387,7 @@ export default function CanvasAssistantPanel({
         </div>
       </header>
       <div className={cn('flex flex-col gap-3 min-h-0 overflow-auto p-4')}>
-        {messages.length === 0 ? (
+        {messages.length === 0 && pendingToolCalls.length === 0 ? (
           <div className={cn(
             'flex flex-1 flex-col items-center justify-center gap-[10px]',
             'max-w-[240px] mx-auto py-6 px-3 text-center',
@@ -248,6 +435,74 @@ export default function CanvasAssistantPanel({
             </div>
           ))
         )}
+        {pendingToolCalls.length > 0 ? (() => {
+          // Aggregate consecutive create_canvas_nodes + connect_canvas_edges
+          // pairs into a single storyboard plan card; everything else falls
+          // back to the per-call confirmation list below. Rendered at the
+          // BOTTOM of the thread so the latest plan sits with the latest reply.
+          const plan = summarizeAgentPlan(pendingToolCalls)
+          const planCallIds = new Set([plan?.createCallId, plan?.connectCallId].filter(Boolean) as string[])
+          const remaining = plan
+            ? pendingToolCalls.filter((call) => !planCallIds.has(call.toolCallId))
+            : pendingToolCalls
+          return (
+            <div className={cn('flex flex-col gap-3')}>
+              {plan ? (
+                <AgentPlanCard plan={plan} resolveCall={resolvePending} />
+              ) : null}
+              {remaining.length > 0 ? (
+                <div
+                  className={cn(
+                    'flex flex-col gap-2 p-3 rounded-nomi border border-nomi-accent-soft bg-nomi-accent-soft/40',
+                  )}
+                  data-pending-tool-calls="true"
+                  aria-label="待确认的 Agent 工具调用"
+                >
+                  <div className={cn('text-nomi-accent text-[12px] font-medium uppercase tracking-wider')}>
+                    Agent 准备调用工具
+                  </div>
+                  {remaining.map((call) => (
+                    <div
+                      key={call.toolCallId}
+                      className={cn('flex flex-col gap-2 p-2 rounded-nomi-sm bg-nomi-paper border border-nomi-line-soft')}
+                      data-tool-call-id={call.toolCallId}
+                    >
+                      <div className={cn('text-nomi-ink text-[13px] font-medium')}>{call.toolName}</div>
+                      <div className={cn('text-nomi-ink-80 text-[12.5px]')}>{summarizeToolCall(call.toolName, call.args)}</div>
+                      <details className={cn('text-nomi-ink-60 text-[11.5px]')}>
+                        <summary className={cn('cursor-pointer select-none')}>查看参数</summary>
+                        <pre className={cn('mt-1 max-h-[160px] overflow-auto p-2 rounded-nomi-sm bg-nomi-ink-05 text-[11px] leading-[1.4] whitespace-pre-wrap break-all')}>
+                          {JSON.stringify(call.args, null, 2)}
+                        </pre>
+                      </details>
+                      <div className={cn('flex items-center justify-end gap-2 mt-1')}>
+                        <WorkbenchButton
+                          className={cn(
+                            'h-7 px-3 rounded-nomi-sm border border-nomi-line bg-nomi-paper text-nomi-ink-80 text-[12px] cursor-pointer',
+                            'hover:bg-nomi-ink-05',
+                          )}
+                          onClick={() => resolvePending(call.toolCallId, { ok: false, message: 'rejected by user' })}
+                        >
+                          拒绝
+                        </WorkbenchButton>
+                        <WorkbenchButton
+                          className={cn(
+                            'h-7 px-3 rounded-nomi-sm border-0 bg-nomi-ink text-nomi-paper text-[12px] cursor-pointer',
+                            'hover:bg-nomi-accent',
+                          )}
+                          onClick={() => resolvePending(call.toolCallId, { ok: true, result: { confirmed: true } })}
+                        >
+                          确认
+                        </WorkbenchButton>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          )
+        })() : null}
+        <div ref={threadBottomRef} aria-hidden="true" />
       </div>
       <form
         className={cn('grid gap-1 p-3 border-t border-nomi-line-soft bg-nomi-paper')}

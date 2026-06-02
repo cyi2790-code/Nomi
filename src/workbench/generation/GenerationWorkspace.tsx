@@ -26,9 +26,12 @@ export default function GenerationWorkspace({
       data-ai-layout={aiSidebar ? aiLayout : 'none'}
       aria-label="生成区"
     >
+      {/* E.2C-29 → 左侧面板重做: 分类导航已下沉到 WorkbenchShell 的
+          ProjectExplorerSidebar「分类」tab（CategoryTree），生成区内不再单独挂载。 */}
       <div className={cn(
         'workbench-generation__canvas',
         'min-w-0 min-h-0 overflow-hidden border-b border-[var(--workbench-border)]',
+        'relative',
       )}>
         {canvas}
       </div>
@@ -43,7 +46,12 @@ export default function GenerationWorkspace({
           {aiSidebar}
         </aside>
       ) : null}
-      <TimelinePanel density="compact" regionLabel="生成时间轴" actionLabelPrefix="生成时间轴-" />
+      <div className={cn(
+        'workbench-generation__timeline',
+        'col-span-full min-w-0 min-h-0',
+      )}>
+        <TimelinePanel density="compact" regionLabel="生成时间轴" actionLabelPrefix="生成时间轴-" />
+      </div>
     </section>
   )
 }

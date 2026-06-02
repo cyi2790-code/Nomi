@@ -14,6 +14,7 @@ import {
 import type {
   GenerationCanvasNode,
   GenerationNodeResult,
+  GenerationProvenance,
   GenerationResultType,
 } from '../model/generationCanvasTypes'
 import {
@@ -299,6 +300,8 @@ export function normalizeCatalogTaskResult(
   const asset = firstVideoAsset || firstImageAsset || result.assets.find((item) => asTrimmedString(item.url))
   if (!asset) throw new Error(inferredType === 'video' ? '模型任务完成但没有返回视频地址' : '模型任务完成但没有返回图片地址')
   const type = (asset.type === 'video' || asset.type === 'image') ? asset.type : inferredType
+  // E11: propagate provenance from electron TaskResult into the node result.
+  const provenance = extractProvenanceFromTaskResult(result)
   return {
     id: `${node.id}-${result.id || Date.now()}`,
     type,
@@ -312,6 +315,7 @@ export function normalizeCatalogTaskResult(
     assetRefId: asset.assetRefId || undefined,
     raw: result.raw,
     createdAt: Date.now(),
+    ...(provenance ? { provenance } : {}),
   }
 }
 
@@ -360,4 +364,33 @@ export async function runCatalogGenerationTask(
   const initialResult = await runTask(vendor, request)
   const finalResult = await waitForCatalogTaskResult(vendor, request, initialResult, options)
   return normalizeCatalogTaskResult(finalResult, executableNode)
+}
+
+/**
+ * E11: Extract provenance from electron TaskResult.
+ *
+ * The runtime attaches a `provenance` sibling field at the TaskResult level
+ * (see electron/runtime.ts runTask). This helper validates the minimum
+ * required field (`timestamp`) and returns a clean GenerationProvenance
+ * for the renderer to embed in node.result.provenance.
+ *
+ * Returns undefined for legacy results (e.g., from v0.4.0 cached tasks).
+ */
+function extractProvenanceFromTaskResult(result: TaskResultDto): GenerationProvenance | undefined {
+  const raw = (result as TaskResultDto & { provenance?: unknown }).provenance
+  if (!raw || typeof raw !== 'object') return undefined
+  const rec = raw as Record<string, unknown>
+  const ts = typeof rec.timestamp === 'number' ? rec.timestamp : Date.now()
+  return {
+    timestamp: ts,
+    ...(typeof rec.provider === 'string' ? { provider: rec.provider } : {}),
+    ...(typeof rec.modelKey === 'string' ? { modelKey: rec.modelKey } : {}),
+    ...(typeof rec.modelVersion === 'string' ? { modelVersion: rec.modelVersion } : {}),
+    ...(typeof rec.prompt === 'string' ? { prompt: rec.prompt } : {}),
+    ...(typeof rec.negativePrompt === 'string' ? { negativePrompt: rec.negativePrompt } : {}),
+    ...(typeof rec.seed === 'number' ? { seed: rec.seed } : {}),
+    ...(rec.params && typeof rec.params === 'object' ? { params: rec.params as Record<string, unknown> } : {}),
+    ...(typeof rec.vendorRequestId === 'string' ? { vendorRequestId: rec.vendorRequestId } : {}),
+    ...(typeof rec.agentRunId === 'string' ? { agentRunId: rec.agentRunId } : {}),
+  }
 }

@@ -139,6 +139,51 @@ export async function upgradeWorkbenchProjectMediaUrls(
   }
 }
 
+// A1.5 step 5：老项目规整。历史上「导入图 / 文件树拖入 / 切图裁剪旋转 / 全景截图」都存成
+// kind:'image'，与真生成图混在一起。新版这些都是 kind:'asset'（无 composer 的素材卡）。
+// 这里在加载时把符合「素材特征」的老 image 节点改判为 asset；保守谓词避免误伤真生成节点。
+const LEGACY_ASSET_SOURCE_TAGS = new Set<string>([
+  'local-drop',
+  'asset-upload',
+  'workspace-file',
+  'image-crop',
+  'image-rotate-left',
+  'image-rotate-right',
+  'image-flip-h',
+  'image-flip-v',
+  'panorama-screenshot',
+])
+
+function isLegacyMaterialImageNode(node: WorkbenchProjectRecordV1['payload']['generationCanvas']['nodes'][number]): boolean {
+  if (node.kind !== 'image') return false
+  // 真生成图带 provenance —— 一定保留为生成节点，绝不转素材。
+  if (node.result?.provenance) return false
+  const meta = node.meta || {}
+  if (meta.localOnly === true) return true
+  const source = typeof meta.source === 'string' ? meta.source : ''
+  if (!source) return false
+  if (LEGACY_ASSET_SOURCE_TAGS.has(source)) return true
+  return source.startsWith('image-grid-split-') || source.startsWith('panorama-')
+}
+
+export function normalizeLegacyImageAssetKinds(record: WorkbenchProjectRecordV1): WorkbenchProjectRecordV1 {
+  const payload = record.payload
+  let changed = false
+  const nextNodes = payload.generationCanvas.nodes.map((node) => {
+    if (!isLegacyMaterialImageNode(node)) return node
+    changed = true
+    return { ...node, kind: 'asset' as const }
+  })
+  if (!changed) return record
+  return {
+    ...record,
+    payload: {
+      ...payload,
+      generationCanvas: { ...payload.generationCanvas, nodes: nextNodes },
+    },
+  }
+}
+
 export function assertWorkbenchProjectMediaUrlsPersistable(record: WorkbenchProjectRecordV1): void {
   const payload = record.payload
   for (const node of payload.generationCanvas.nodes) {
