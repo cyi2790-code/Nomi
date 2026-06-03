@@ -138,6 +138,44 @@ export type GenerationErrorReport = {
 }
 
 /**
+ * 未命中任何已知分类时，从 raw 里抠一句**可读首行**当 reason——而不是又甩一句
+ * "生成失败"（那会和顶部状态徽标重复，对用户零信息）。优先解析 JSON 里的
+ * message/error 字段，否则取第一行非空文本并截断。抠不出可读内容才返回 ''。
+ */
+function extractReadableErrorLine(raw: string): string {
+  const source = String(raw || '').trim()
+  if (!source) return ''
+  // 1) provider 常把报错塞进 JSON：{ error: { message } } / { message } / { error }
+  try {
+    const parsed = JSON.parse(source) as unknown
+    if (parsed && typeof parsed === 'object') {
+      const record = parsed as Record<string, unknown>
+      const errorField = record.error
+      const candidates = [
+        typeof errorField === 'object' && errorField ? (errorField as Record<string, unknown>).message : undefined,
+        typeof errorField === 'string' ? errorField : undefined,
+        record.message,
+        record.detail,
+        record.error_description,
+      ]
+      for (const value of candidates) {
+        if (typeof value === 'string' && value.trim()) return truncateLine(value.trim())
+      }
+    }
+  } catch {
+    // 不是 JSON，走纯文本路径
+  }
+  // 2) 纯文本：取第一行非空内容
+  const firstLine = source.split('\n').map((line) => line.trim()).find(Boolean)
+  return firstLine ? truncateLine(firstLine) : ''
+}
+
+function truncateLine(value: string): string {
+  const clean = value.replace(/\s+/g, ' ').trim()
+  return clean.length > 100 ? `${clean.slice(0, 99)}…` : clean
+}
+
+/**
  * Single source of truth: classify a raw API error into a human reason + hint.
  * The generation runner stores the raw message; the node error UI calls this to
  * render. Common cases: API key 无效、模型未配置、配额/限流、网络/超时、内容拦截。
@@ -161,7 +199,13 @@ export function classifyGenerationError(message: string): GenerationErrorReport 
   if (lower.includes('content') && (lower.includes('policy') || lower.includes('safety') || lower.includes('filter'))) {
     return { reason: '提示词被拦截', hint: '提示词触发了安全策略，请修改后重试。', raw }
   }
-  return { reason: '生成失败', hint: '', raw }
+  // 兜底：抠 raw 可读首行当 reason（没有就退回"生成失败"），并给一句通用建议，
+  // 别让用户对着空白干瞪眼。
+  return {
+    reason: extractReadableErrorLine(raw) || '生成失败',
+    hint: '可能是服务商临时故障或额度问题，建议稍等重试，或换一个模型。',
+    raw,
+  }
 }
 
 export type RunGenerationNodesBatchOptions = RunGenerationNodeOptions & {

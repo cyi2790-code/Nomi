@@ -805,8 +805,10 @@ function BaseGenerationNodeImpl({
     const canSendToTimeline = canDragGenerationNodeToTimeline(node, {
         readOnly,
     });
+    // 失败态不再显示文字徽标——错误信息已铺满节点正文（NodeErrorReport），
+    // 顶部再写一遍「生成失败」是重复噪音（2026-06-03 6 角色评审）。
     const showStatusBadge =
-        status === "queued" || status === "running" || status === "error";
+        status === "queued" || status === "running";
 
     // v0.7.2 perf: 用 primitive 订阅 sourceNodeTitle / categoryId / exists 重组 label
     const sourceNodeLabel =
@@ -1120,13 +1122,13 @@ function BaseGenerationNodeImpl({
                 onClose={() => setProvenanceOpen(false)}
             />
 
+            {/* 失败态：错误卡铺满节点正文（自身 absolute inset-0 z-[5]），
+                盖住占位底纹但不挡 composer/resize/handles。 */}
             {status === "error" && node.error ? (
-                <div className="absolute inset-x-1 bottom-1 z-[6]">
-                    <NodeErrorReport
-                        message={node.error}
-                        onRetry={() => { void runGenerationNode(node.id) }}
-                    />
-                </div>
+                <NodeErrorReport
+                    message={node.error}
+                    onRetry={() => { void runGenerationNode(node.id) }}
+                />
             ) : null}
 
             {/* [DESIGN-CARDS-07] 卡片分发：非 shots 分类直接渲染对应 card 组件
