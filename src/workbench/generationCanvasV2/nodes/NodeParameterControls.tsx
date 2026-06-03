@@ -17,7 +17,7 @@ import { normalizeOrientation, type Orientation } from '../../../utils/orientati
 import type { ModelOption } from '../../../config/models'
 import { WorkbenchButton } from '../../../design'
 import type { GenerationCanvasEdge, GenerationCanvasEdgeMode, GenerationCanvasNode } from '../model/generationCanvasTypes'
-import { isImageLikeGenerationNodeKind, isVideoLikeGenerationNodeKind } from '../model/generationNodeKinds'
+import { getGenerationNodeExecutionKind, isImageLikeGenerationNodeKind, isVideoLikeGenerationNodeKind } from '../model/generationNodeKinds'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'
 import { importWorkbenchLocalAssetFile, type WorkbenchAssetDto } from '../../api/assetUploadApi'
 
@@ -654,7 +654,9 @@ export default function NodeParameterControls({
   const [openSlotKey, setOpenSlotKey] = React.useState('')
   const isImageLike = isImageLikeGenerationNodeKind(node.kind)
   const isVideoLike = isVideoLikeGenerationNodeKind(node.kind)
-  const isGenerationNode = isImageLike || isVideoLike
+  // C5：文本节点也是可生成节点（executionKind:'text'）——要渲染模型选择器，否则没处选模型。
+  const isTextLike = getGenerationNodeExecutionKind(node.kind) === 'text'
+  const isGenerationNode = isImageLike || isVideoLike || isTextLike
   if (!isGenerationNode) return null
 
   const selectedModelValue = readMeta(meta, 'modelKey') || readMeta(meta, 'modelAlias') || readMeta(meta, 'imageModel') || readMeta(meta, 'videoModel')

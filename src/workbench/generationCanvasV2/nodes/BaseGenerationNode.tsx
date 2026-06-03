@@ -1148,9 +1148,10 @@ function BaseGenerationNodeImpl({
                 </div>
             ) : null}
 
-            {/* C5: 文本节点 —— 可编辑文档 body，脱离图片预览。 */}
+            {/* C5: 文本节点 —— 可编辑文档 body。外层不裁剪，让浮动格式条能浮到节点上方
+                （圆角/阴影/裁剪在 TextDocumentNode 内层 body）。 */}
             {isTextKind ? (
-                <div className='w-full h-full rounded-nomi shadow-nomi-md overflow-hidden bg-nomi-paper'>
+                <div className='w-full h-full'>
                     <TextDocumentNode node={node} />
                 </div>
             ) : null}
