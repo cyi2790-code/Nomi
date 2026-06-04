@@ -2176,13 +2176,18 @@ function authQueryParams(vendor: Vendor, apiKey: string): Record<string, string>
   return buildAuthQueryParams(vendor.authType as AuthType, apiKey, vendor.authQueryParam ?? undefined);
 }
 
-function endpoint(vendor: Vendor, suffix: string): string {
+export function endpoint(vendor: Vendor, suffix: string): string {
   const base = String(vendor.baseUrlHint || "").trim().replace(/\/+$/, "");
   if (!base) throw new Error(`Base URL missing: ${vendor.key}`);
   // Don't double-append: if the vendor already configured a baseUrlHint that
-  // ends in the suffix (e.g. /v1), respect it. Users routinely paste full
-  // "https://api.example.com/v1" URLs.
+  // ends in the full suffix, respect it.
   if (suffix && base.endsWith(suffix)) return base;
+  // 用户常把整段 "https://api.example.com/v1" 填进 Base URL（README 也这么教）。
+  // 若 base 以 /v1 结尾、suffix 又以 /v1/ 开头，合并避免拼成 ".../v1/v1/..."
+  // （Moonshot 等供应商对错误路径返回"没找到对象"）。
+  if (suffix.startsWith("/v1/") && base.endsWith("/v1")) {
+    return `${base}${suffix.slice(3)}`;
+  }
   return `${base}${suffix}`;
 }
 
