@@ -27,7 +27,7 @@ const SCAN_DIRS = ["src", "electron"];
 const ALLOWLIST = {
   "src/workbench/generationCanvasV2/nodes/scene3d/Scene3DFullscreen.tsx": 4598,
   "electron/runtime.ts": 2737,
-  "src/workbench/generationCanvasV2/nodes/BaseGenerationNode.tsx": 1410,
+  "src/workbench/generationCanvasV2/nodes/BaseGenerationNode.tsx": 1406,
   "src/workbench/generationCanvasV2/components/GenerationCanvas.tsx": 1186,
   "src/workbench/generationCanvasV2/store/generationCanvasStore.ts": 1122,
   "src/workbench/generationCanvasV2/nodes/NodeParameterControls.tsx": 1097,

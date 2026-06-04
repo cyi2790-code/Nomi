@@ -28,6 +28,7 @@ import {
 import { clientXToFrame } from "../../timeline/timelineEdit";
 import { getTrackTypeForClipType } from "../../timeline/timelineTypes";
 import { buildClipFromGenerationNode } from "../model/buildClipFromGenerationNode";
+import { toast } from "../../../ui/toast";
 import { canRunGenerationNode, runGenerationNode } from "../runner/generationRunController";
 import { NodeErrorReport } from "./NodeErrorReport";
 import { WorkbenchButton } from "../../../design";
@@ -540,30 +541,22 @@ function BaseGenerationNodeImpl({
         flushScheduledMove();
         const dragStart = dragStartRef.current;
         const hadResize = Boolean(resizeStartRef.current);
+        const droppedOverTimeline = dragStart?.dragging
+            ? findTimelineDropTarget(event.clientX, event.clientY)
+            : null;
         const timelineDropTarget =
-            dragStart?.dragging && node.result?.url
-                ? findTimelineDropTarget(event.clientX, event.clientY)
-                : null;
+            droppedOverTimeline && node.result?.url ? droppedOverTimeline : null;
+        // 用户把还没生成画面的节点拖到时间轴：给反馈，别静默弹回（P0-9 / I-1）。
+        if (droppedOverTimeline && !node.result?.url) {
+            toast("该节点还没生成画面，先点「生成」再拖到时间轴", "info");
+        }
         if (timelineDropTarget) {
             const timeline = useWorkbenchStore.getState().timeline;
             const rect = timelineDropTarget.getBoundingClientRect();
-            const startFrame = clientXToFrame(
-                event.clientX,
-                rect.left,
-                timeline.scale,
-            );
-            const clip = buildClipFromGenerationNode(node, {
-                fps: timeline.fps,
-                startFrame,
-            });
+            const startFrame = clientXToFrame(event.clientX, rect.left, timeline.scale);
+            const clip = buildClipFromGenerationNode(node, { fps: timeline.fps, startFrame });
             if (clip) {
-                useWorkbenchStore
-                    .getState()
-                    .addTimelineClipAtFrame(
-                        clip,
-                        getTrackTypeForClipType(clip.type),
-                        startFrame,
-                    );
+                useWorkbenchStore.getState().addTimelineClipAtFrame(clip, getTrackTypeForClipType(clip.type), startFrame);
                 if (!dragStart?.multi) {
                     moveNode(
                         node.id,
@@ -610,7 +603,10 @@ function BaseGenerationNodeImpl({
             fps: timeline.fps,
             startFrame,
         });
-        if (!clip) return;
+        if (!clip) {
+            toast("该节点还没生成画面，先点「生成」", "info");
+            return;
+        }
         useWorkbenchStore
             .getState()
             .addTimelineClipAtFrame(

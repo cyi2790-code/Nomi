@@ -19,6 +19,7 @@ import { cn } from "../utils/cn";
 import { toast } from "../ui/toast";
 import { setDesktopActiveProjectId } from "../desktop/activeProject";
 import { getDesktopBridge } from "../desktop/bridge";
+import { listWorkbenchModelCatalogModels } from "./api/modelCatalogApi";
 import { buildStudioUrl } from "../utils/appRoutes";
 import {
     openWorkspaceFromLibrary,
@@ -203,6 +204,21 @@ export default function NomiStudioApp(): JSX.Element {
      */
     const tryExample = React.useCallback(
         async (example: TryNowExample) => {
+            // 模型预检（P0-9 / I-2）：示例靠 Agent「拆镜头」跑起来，需要文本模型。
+            // 没配就先引导去模型接入，别让最显眼的「30 秒体验」静默失败在 Agent 调用上。
+            const textModels = await listWorkbenchModelCatalogModels({
+                kind: "text",
+                enabled: true,
+            }).catch(() => []);
+            if (textModels.length === 0) {
+                toast("先接入一个文本模型，就能一键体验示例", "info");
+                window.dispatchEvent(
+                    new CustomEvent("nomi-open-model-catalog", {
+                        detail: { intent: "model-integration" },
+                    }),
+                );
+                return;
+            }
             const desktop = getDesktopBridge();
             let projectId: string | null = null;
             if (desktop?.workspace) {
