@@ -51,6 +51,25 @@ export function createLinkedAbortController(external?: AbortSignal): AbortContro
   return controller;
 }
 
+// Explicit retry/backoff for the chat path. The AI SDK default is 2; we make it
+// explicit + a touch higher so a transient 429/5xx on flaky relays doesn't kill
+// the turn. (Applies to establishing each step's request, not mid-stream.)
+const AGENT_MAX_RETRIES = 3;
+
+/**
+ * Per-call streamText tuning for the agent loop, kept in one place: step cap by
+ * skill (planners get headroom), tool-call streaming, explicit retries, and
+ * malformed-JSON self-repair. Spread into the streamText(...) options.
+ */
+export function agentStreamTuning(skillKey: string, model: LanguageModelV1) {
+  return {
+    maxSteps: maxStepsForSkill(skillKey),
+    toolCallStreaming: true as const,
+    maxRetries: AGENT_MAX_RETRIES,
+    experimental_repairToolCall: createToolCallRepair(model),
+  };
+}
+
 // Self-repair malformed tool-call JSON: weaker models sometimes emit invalid
 // args for complex schemas. Ask the same model to fix its own JSON instead of
 // crashing the whole turn; return null to let the SDK report the original error.

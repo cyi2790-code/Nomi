@@ -6,7 +6,7 @@ import { hardenedFetch, hardenedFetchText } from "./hardenedFetch";
 import { localizeAssetsForVendor, resolveAssetIngestion } from "./catalog/assetLocalization";
 import { absolutePathFromLocalAssetUrl, readNomiLocalAsset, postJsonForAssetUpload } from "./assets/localAssetFile";
 import { streamText, tool, type CoreMessage, type LanguageModelV1 } from "ai";
-import { capAgentHistory, createLinkedAbortController, createToolCallRepair, maxStepsForSkill } from "./ai/agentChatHarness";
+import { agentStreamTuning, capAgentHistory, createLinkedAbortController } from "./ai/agentChatHarness";
 import { z } from "zod";
 import { buildAiSdkModel } from "./ai/buildAiSdkModel";
 import { consumeAgentStreamWithTimeout } from "./ai/agentStreamConsumer";
@@ -2499,11 +2499,9 @@ export async function runAgentChatV2(
     messages,
     temperature: typeof payload.temperature === "number" ? payload.temperature : 0.7,
     tools,
-    maxSteps: maxStepsForSkill(resolvedSkillKey),
-    toolCallStreaming: true,
     abortSignal: abortController.signal,
-    // Self-repair malformed tool-call JSON instead of crashing the turn (see harness module).
-    experimental_repairToolCall: createToolCallRepair(languageModel),
+    // maxSteps(skill) + toolCallStreaming + maxRetries + repairToolCall（见 harness 模块）。
+    ...agentStreamTuning(resolvedSkillKey, languageModel),
     onError: ({ error }) => hooks.emit({ type: "error", message: error instanceof Error ? error.message : String(error) }),
   });
 
