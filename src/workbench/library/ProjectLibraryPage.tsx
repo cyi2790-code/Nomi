@@ -83,11 +83,15 @@ function formatUpdatedAt(value: number): string {
   return new Date(value).toLocaleDateString('zh-CN')
 }
 
-function ThumbnailMosaic({ urls }: { urls: string[] }): JSX.Element {
+function ThumbnailMosaic({ urls, name }: { urls: string[]; name?: string }): JSX.Element {
   if (urls.length === 0) {
+    // 未生成的项目没有封面图 → 显示项目名占位（而非纯图标白屏），一眼认得出是哪个项目。
     return (
-      <div className="absolute inset-0 flex items-center justify-center bg-nomi-ink-05">
-        <IconMovie size={32} stroke={1.2} className="text-nomi-ink-30" aria-hidden />
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-3 bg-nomi-ink-05">
+        <IconMovie size={26} stroke={1.2} className="text-nomi-ink-30" aria-hidden />
+        {name ? (
+          <span className="max-w-full text-center text-[12.5px] font-medium leading-snug text-nomi-ink-60 line-clamp-2">{name}</span>
+        ) : null}
       </div>
     )
   }
@@ -180,6 +184,34 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
           </section>
         ) : null}
 
+        {/* ── 主行动：新建空白 / 打开文件夹（始终渲染，不被示例 gate；从下方网格挪上来 → 不再两套并行入口）── */}
+        <section className="shrink-0 flex items-center gap-2.5 mb-1" aria-label="开始一个项目">
+          <button
+            type="button"
+            onClick={() => onNewProject()}
+            className={cn(
+              'inline-flex items-center gap-1.5 h-[34px] px-4 rounded-pill border-0 cursor-pointer font-inherit',
+              'bg-nomi-ink text-nomi-paper text-[13px] font-medium transition-colors hover:bg-nomi-accent',
+            )}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            新建空白项目
+          </button>
+          {onOpenFolder ? (
+            <button
+              type="button"
+              onClick={onOpenFolder}
+              className={cn(
+                'inline-flex items-center gap-1.5 h-[34px] px-3.5 rounded-pill cursor-pointer font-inherit',
+                'border border-nomi-line bg-nomi-paper text-nomi-ink-80 text-[12.5px] transition-colors hover:border-nomi-ink-20',
+              )}
+            >
+              <IconFolderOpen size={16} stroke={1.8} aria-hidden="true" />
+              打开已有文件夹
+            </button>
+          ) : null}
+        </section>
+
         {/* ── Search ── */}
         <div className={cn(
           'shrink-0 flex items-center gap-2 h-9 max-w-[360px] px-3',
@@ -201,77 +233,11 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
           />
         </div>
 
-        {/* ── Grid ── */}
+        {/* ── 最近项目 ── */}
+        {filteredProjects.length > 0 ? (
+          <h2 className="shrink-0 m-0 text-[12px] font-medium text-nomi-ink-60">最近项目</h2>
+        ) : null}
         <div className="shrink-0 grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-[14px]">
-
-          {/* New project — first card, plain solid style */}
-          <button
-            className={cn(
-              'group bg-nomi-paper border border-nomi-line rounded-nomi-lg overflow-hidden cursor-pointer text-left font-inherit',
-              'transition-[box-shadow,transform,border-color] duration-150',
-              'hover:shadow-nomi-md hover:border-[var(--nomi-ink-20)] hover:-translate-y-0.5',
-              'active:translate-y-0 active:shadow-none',
-            )}
-            type="button"
-            onClick={() => onNewProject()}
-          >
-            <div className={cn(
-              'aspect-video relative overflow-hidden',
-              'flex items-center justify-center bg-nomi-bg transition-colors duration-150',
-              'group-hover:bg-[color-mix(in_oklch,var(--nomi-accent)_6%,var(--nomi-bg))]',
-            )}>
-              <div className={cn(
-                'w-10 h-10 rounded-full bg-nomi-paper border border-nomi-line',
-                'grid place-items-center text-nomi-ink-40',
-                'transition-[border-color,color,background] duration-150',
-                'group-hover:bg-[color-mix(in_oklch,var(--nomi-accent)_10%,var(--nomi-paper))]',
-                'group-hover:border-[color-mix(in_oklch,var(--nomi-accent)_40%,transparent)]',
-                'group-hover:text-nomi-accent',
-              )}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14"/>
-                </svg>
-              </div>
-            </div>
-            <div className="px-[13px] pt-[10px] pb-3">
-              <div className="text-[13px] font-medium text-nomi-ink-60 truncate mb-0.5 group-hover:text-nomi-accent">新建项目</div>
-              <div className="text-[11.5px] text-nomi-ink-40 truncate">存到默认位置，立即开始</div>
-            </div>
-          </button>
-
-          {onOpenFolder ? (
-            <button
-              className={cn(
-                'group bg-nomi-paper border border-nomi-line rounded-nomi-lg overflow-hidden cursor-pointer text-left font-inherit',
-                'transition-[box-shadow,transform,border-color] duration-150',
-                'hover:shadow-nomi-md hover:border-[var(--nomi-ink-20)] hover:-translate-y-0.5',
-                'active:translate-y-0 active:shadow-none',
-              )}
-              type="button"
-              onClick={onOpenFolder}
-            >
-              <div className={cn(
-                'aspect-video relative overflow-hidden',
-                'flex items-center justify-center bg-nomi-bg transition-colors duration-150',
-                'group-hover:bg-[color-mix(in_oklch,var(--nomi-accent)_6%,var(--nomi-bg))]',
-              )}>
-                <div className={cn(
-                  'w-10 h-10 rounded-full bg-nomi-paper border border-nomi-line',
-                  'grid place-items-center text-nomi-ink-40',
-                  'transition-[border-color,color,background] duration-150',
-                  'group-hover:bg-[color-mix(in_oklch,var(--nomi-accent)_10%,var(--nomi-paper))]',
-                  'group-hover:border-[color-mix(in_oklch,var(--nomi-accent)_40%,transparent)]',
-                  'group-hover:text-nomi-accent',
-                )}>
-                  <IconFolderOpen size={21} stroke={1.8} aria-hidden="true" />
-                </div>
-              </div>
-              <div className="px-[13px] pt-[10px] pb-3">
-                <div className="text-[13px] font-medium text-nomi-ink-60 truncate mb-0.5 group-hover:text-nomi-accent">打开文件夹</div>
-                <div className="text-[11.5px] text-nomi-ink-40 truncate">选择已有目录作为项目空间</div>
-              </div>
-            </button>
-          ) : null}
 
           {filteredProjects.map((project) => {
             const urls = project.thumbnailUrls || (project.thumbnail ? [project.thumbnail] : [])
@@ -293,7 +259,7 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
                   className="aspect-video relative overflow-hidden bg-nomi-ink-05"
                   style={urls.length === 0 && project.thumbStyle ? { background: project.thumbStyle } : undefined}
                 >
-                  <ThumbnailMosaic urls={urls} />
+                  <ThumbnailMosaic urls={urls} name={project.name} />
                   <div className={cn(
                     'absolute inset-0 bg-[oklch(0.12_0.01_80/0.3)] opacity-0 transition-opacity duration-150',
                     'flex items-center justify-center z-[2]',

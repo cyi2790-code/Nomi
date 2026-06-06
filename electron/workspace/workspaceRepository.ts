@@ -12,7 +12,28 @@ export type WorkspaceRepositoryDeps = {
 export type WorkspaceProjectSummary = Omit<WorkspaceProjectRecordV2, "payload"> & {
   rootPath: string;
   missing: boolean;
+  // 列表用的封面缩略图：从 manifest 的 generationCanvas 节点结果派生（不持久化进 manifest）。
+  // 修「最近项目白屏」根因——桌面 list 旧逻辑只读 manifest 现有字段、不从画布节点派生。
+  thumbnail?: string;
+  thumbnailUrls?: string[];
 };
+
+/** 从 manifest（payload.generationCanvas / 顶层 generationCanvas）的前若干个"有生成结果"的节点取封面 url。 */
+function deriveThumbnailUrls(record: unknown, max = 4): string[] {
+  const r = record as { payload?: unknown; generationCanvas?: unknown } | null;
+  const payload = r?.payload as { generationCanvas?: unknown } | undefined;
+  const gc = (payload && typeof payload === "object" ? payload.generationCanvas : undefined) ?? r?.generationCanvas;
+  const nodes = (gc as { nodes?: unknown } | undefined)?.nodes;
+  if (!Array.isArray(nodes)) return [];
+  const urls: string[] = [];
+  for (const n of nodes) {
+    if (urls.length >= max) break;
+    const result = (n as { result?: { url?: unknown; thumbnailUrl?: unknown } } | null)?.result;
+    const url = (typeof result?.url === "string" && result.url) || (typeof result?.thumbnailUrl === "string" && result.thumbnailUrl) || "";
+    if (typeof url === "string" && url.length > 4) urls.push(url);
+  }
+  return urls;
+}
 
 type RecordInput = {
   id?: unknown;
@@ -103,7 +124,9 @@ export function listWorkspaceProjects(deps: WorkspaceRepositoryDeps): WorkspaceP
         true,
       );
     }
-    return withoutPayload({ ...manifest, lastKnownRootPath: entry.rootPath }, entry.rootPath, false);
+    const summary = withoutPayload({ ...manifest, lastKnownRootPath: entry.rootPath }, entry.rootPath, false);
+    const thumbnailUrls = deriveThumbnailUrls(manifest);
+    return thumbnailUrls.length ? { ...summary, thumbnailUrls, thumbnail: thumbnailUrls[0] } : summary;
   });
 }
 
