@@ -35,6 +35,8 @@ type SendGenerationCanvasAgentMessageInput = {
    * client will auto-confirm or auto-execute on the user's behalf.
    */
   onToolCall?: (event: ToolCallEvent) => void
+  /** Exposes a cancel handle (user "Stop") once the backend session exists. */
+  onCancelReady?: (cancel: () => void) => void
 }
 
 export type GenerationCanvasAgentResponse = {
@@ -115,6 +117,7 @@ export async function sendGenerationCanvasAgentMessage(
     skillKey: input.skill?.key || 'workbench.generation.canvas-planner',
     skillName: input.skill?.name || '生成区节点规划',
     onContent: input.onContent,
+    onCancelReady: input.onCancelReady,
     onToolCall: (event) => {
       if (input.onToolCall) {
         input.onToolCall(event)

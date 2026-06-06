@@ -38,6 +38,19 @@ export function maxStepsForSkill(skillKey: string): number {
   return PLANNING_SKILL_KEYS.has(skillKey) ? PLANNING_AGENT_MAX_STEPS : DEFAULT_AGENT_MAX_STEPS;
 }
 
+// Funnel an optional external abort signal (e.g. the user's "Stop" button) into
+// a fresh local AbortController, so streamText aborts on EITHER the first-chunk
+// timeout OR an external cancel — a single abort funnel. Returns the controller
+// to wire into streamText + the stream consumer.
+export function createLinkedAbortController(external?: AbortSignal): AbortController {
+  const controller = new AbortController();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller;
+}
+
 // Self-repair malformed tool-call JSON: weaker models sometimes emit invalid
 // args for complex schemas. Ask the same model to fix its own JSON instead of
 // crashing the whole turn; return null to let the SDK report the original error.

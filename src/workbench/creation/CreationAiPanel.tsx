@@ -1,5 +1,5 @@
 import React from 'react'
-import { IconCursorText, IconFilePlus, IconMovie, IconReplace, IconSend2, IconSparkles } from '@tabler/icons-react'
+import { IconCursorText, IconFilePlus, IconMovie, IconPlayerStopFilled, IconReplace, IconSend2, IconSparkles } from '@tabler/icons-react'
 import { NomiAILabel, NomiLoadingMark, NomiSelect, WorkbenchButton, WorkbenchIconButton } from '../../design'
 import { NomiMarkdown } from '../common/NomiMarkdown'
 import { cn } from '../../utils/cn'
@@ -69,6 +69,8 @@ function readWorkbenchAiReplyText(response: unknown): string {
 
 export default function CreationAiPanel(): JSX.Element {
   const [sending, setSending] = React.useState(false)
+  // Cancel handle for the in-flight agent turn (user "Stop").
+  const cancelRef = React.useRef<(() => void) | null>(null)
   const [pendingToolCalls, setPendingToolCalls] = React.useState<PendingDocToolCall[]>([])
   const messagesScrollRef = useTransientScrollingClass<HTMLDivElement>('workbench-scrollbar-visible')
   const workbenchDocument = useWorkbenchStore((state) => state.workbenchDocument)
@@ -201,6 +203,9 @@ export default function CreationAiPanel(): JSX.Element {
             message.id === pendingId ? { ...message, content: streamedText || '处理中...' } : message
           )))
         },
+        onCancelReady: (cancel) => {
+          cancelRef.current = cancel
+        },
         onToolCall: (event: ToolCallEvent) => {
           // Read tools auto-execute against the live editor.
           if (event.toolName === 'read_full_text') {
@@ -238,6 +243,7 @@ export default function CreationAiPanel(): JSX.Element {
       )))
     } finally {
       setSending(false)
+      cancelRef.current = null
     }
   }, [activeMode, documentText, draft, launchStoryboardPlanning, selectedText, sending, setDraft, setError, setMessages])
 
@@ -450,19 +456,33 @@ export default function CreationAiPanel(): JSX.Element {
             <IconSparkles size={14} />
             <span>定妆</span>
           </WorkbenchButton>
-          <WorkbenchIconButton
-            className={cn(
-              'workbench-creation-ai__send',
-              'shrink-0 w-[30px] inline-flex items-center justify-center cursor-pointer',
-              'disabled:cursor-not-allowed disabled:opacity-[0.48]',
-              'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
-            )}
-            label="发送"
-            aria-label="创作 AI 发送"
-            disabled={sending || !draft.trim()}
-            onClick={() => void send()}
-            icon={<IconSend2 size={15} />}
-          />
+          {sending ? (
+            <WorkbenchIconButton
+              className={cn(
+                'workbench-creation-ai__send',
+                'shrink-0 w-[30px] inline-flex items-center justify-center cursor-pointer',
+                'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
+              )}
+              label="停止"
+              aria-label="停止生成"
+              onClick={() => cancelRef.current?.()}
+              icon={<IconPlayerStopFilled size={13} />}
+            />
+          ) : (
+            <WorkbenchIconButton
+              className={cn(
+                'workbench-creation-ai__send',
+                'shrink-0 w-[30px] inline-flex items-center justify-center cursor-pointer',
+                'disabled:cursor-not-allowed disabled:opacity-[0.48]',
+                'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
+              )}
+              label="发送"
+              aria-label="创作 AI 发送"
+              disabled={!draft.trim()}
+              onClick={() => void send()}
+              icon={<IconSend2 size={15} />}
+            />
+          )}
         </div>
       </footer>
     </aside>

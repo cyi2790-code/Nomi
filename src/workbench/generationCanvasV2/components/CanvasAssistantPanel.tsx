@@ -1,4 +1,4 @@
-import { IconSend2, IconX } from '@tabler/icons-react'
+import { IconPlayerStopFilled, IconSend2, IconX } from '@tabler/icons-react'
 import { NomiAILabel, NomiSelect, WorkbenchButton, WorkbenchIconButton } from '../../../design'
 import React from 'react'
 import { cn } from '../../../utils/cn'
@@ -87,6 +87,9 @@ export default function CanvasAssistantPanel({
   const snapshot = React.useMemo(() => generationCanvasTools.read_canvas(), [nodes, edges, selectedNodeIds])
   const selectedNodes = React.useMemo(() => generationCanvasTools.read_selected_nodes(), [nodes, selectedNodeIds])
   const [busy, setBusy] = React.useState(false)
+  // Cancel handle for the in-flight agent turn (user "Stop"); set once the
+  // backend session exists, cleared when the turn ends.
+  const cancelRef = React.useRef<(() => void) | null>(null)
   const [mode, setMode] = React.useState<'agent' | 'chat' | 'refine'>('agent')
   const [pendingToolCalls, setPendingToolCalls] = React.useState<PendingToolCall[]>([])
   const threadBottomRef = React.useRef<HTMLDivElement | null>(null)
@@ -172,11 +175,20 @@ export default function CanvasAssistantPanel({
           onContent: (_delta, streamedText) => {
             updateMessage(assistantMessageId, streamedText || '处理中...')
           },
+          onCancelReady: (cancel) => {
+            cancelRef.current = cancel
+          },
           onToolCall: (event: ToolCallEvent) => {
-            // Read-only tools auto-execute without user interaction.
+            // Read-only tools auto-execute without user interaction. Wrap in
+            // try/catch so a read failure can't strand the agent loop waiting
+            // for a confirm that never comes.
             if (event.toolName === 'read_canvas_state') {
-              const snap = generationCanvasTools.read_canvas()
-              void event.confirm({ ok: true, result: snap })
+              try {
+                const snap = generationCanvasTools.read_canvas()
+                void event.confirm({ ok: true, result: snap })
+              } catch (error: unknown) {
+                void event.confirm({ ok: false, message: error instanceof Error ? error.message : String(error) })
+              }
               return
             }
             // Destructive / state-changing tools wait for explicit user
@@ -223,6 +235,7 @@ export default function CanvasAssistantPanel({
         )
       } finally {
         setBusy(false)
+        cancelRef.current = null
       }
     })()
   }, [appendMessage, busy, mode, selectedNodes, setDraft, setMessages, snapshot, updateMessage])
@@ -506,19 +519,34 @@ export default function CanvasAssistantPanel({
             />
             <AssistantModelPicker />
           </div>
-          <WorkbenchIconButton
-            type="submit"
-            className={cn(
-              'w-[30px] h-[30px] grid place-items-center',
-              'border-0 rounded-full bg-nomi-ink text-nomi-paper cursor-pointer',
-              'hover:enabled:bg-nomi-accent',
-              'disabled:bg-nomi-ink-20 disabled:text-nomi-ink-40 disabled:cursor-not-allowed',
-            )}
-            disabled={busy || !draft.trim()}
-            label="发送"
-            aria-label="生成 AI 发送"
-            icon={<IconSend2 size={15} />}
-          />
+          {busy ? (
+            <WorkbenchIconButton
+              type="button"
+              onClick={() => cancelRef.current?.()}
+              className={cn(
+                'w-[30px] h-[30px] grid place-items-center',
+                'border-0 rounded-full bg-nomi-ink text-nomi-paper cursor-pointer',
+                'hover:enabled:bg-nomi-accent',
+              )}
+              label="停止"
+              aria-label="停止生成"
+              icon={<IconPlayerStopFilled size={13} />}
+            />
+          ) : (
+            <WorkbenchIconButton
+              type="submit"
+              className={cn(
+                'w-[30px] h-[30px] grid place-items-center',
+                'border-0 rounded-full bg-nomi-ink text-nomi-paper cursor-pointer',
+                'hover:enabled:bg-nomi-accent',
+                'disabled:bg-nomi-ink-20 disabled:text-nomi-ink-40 disabled:cursor-not-allowed',
+              )}
+              disabled={!draft.trim()}
+              label="发送"
+              aria-label="生成 AI 发送"
+              icon={<IconSend2 size={15} />}
+            />
+          )}
         </div>
       </form>
     </aside>

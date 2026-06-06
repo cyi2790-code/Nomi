@@ -315,6 +315,7 @@ type AgentChatV2Session = {
     resolve: (decision: { ok: true; result: unknown } | { ok: false; message: string }) => void;
   }>;
   cancelled: boolean;
+  abortController: AbortController;
 };
 
 const agentChatV2Sessions = new Map<string, AgentChatV2Session>();
@@ -333,6 +334,7 @@ function registerAgentChatV2Ipc(): void {
       webContentsId: event.sender.id,
       pendingConfirmations: new Map(),
       cancelled: false,
+      abortController: new AbortController(),
     };
     agentChatV2Sessions.set(sessionId, session);
 
@@ -341,6 +343,7 @@ function registerAgentChatV2Ipc(): void {
     queueMicrotask(() => {
       void runAgentChatV2(payload as Parameters<typeof runAgentChatV2>[0], {
         emit: (evt) => sendChatV2Event(session, evt),
+        abortSignal: session.abortController.signal,
         awaitToolConfirmation: ({ toolCallId, toolName, args }) => new Promise((resolve) => {
           if (session.cancelled) {
             resolve({ ok: false, message: "session cancelled" });
@@ -395,7 +398,9 @@ function registerAgentChatV2Ipc(): void {
     const session = agentChatV2Sessions.get(payload.sessionId);
     if (!session) return { ok: false, error: "session not found" };
     session.cancelled = true;
-    // Resolve all pending confirmations as rejected so the agent loop exits.
+    // Abort the in-flight stream (real cancel, not just flag) + reject pending
+    // confirmations so the agent loop exits even mid-stream.
+    session.abortController.abort();
     for (const [toolCallId, pending] of session.pendingConfirmations) {
       pending.resolve({ ok: false, message: "session cancelled" });
       session.pendingConfirmations.delete(toolCallId);

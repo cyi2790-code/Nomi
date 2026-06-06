@@ -58,6 +58,8 @@ export type RunWorkbenchAgentInput = {
    * auto-executes for read tools) and must invoke `event.confirm(...)`.
    */
   onToolCall?: (event: ToolCallEvent) => void
+  /** Called once the backend session exists, exposing a cancel handle (user "Stop"). */
+  onCancelReady?: (cancel: () => void) => void
 }
 
 export async function runWorkbenchAgent(input: RunWorkbenchAgentInput): Promise<AgentsChatResponseDto> {
@@ -82,6 +84,9 @@ export async function runWorkbenchAgent(input: RunWorkbenchAgentInput): Promise<
     onContent: input.onContent,
     onSession: (session: AgentChatV2Session) => {
       activeSession = session
+      input.onCancelReady?.(() => {
+        void session.cancel()
+      })
     },
     onEvent: (event: { event: string; data: Record<string, unknown> | Record<string, never> }) => {
       if (event.event !== 'tool-call') return

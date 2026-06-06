@@ -6,7 +6,7 @@ import { hardenedFetch, hardenedFetchText } from "./hardenedFetch";
 import { localizeAssetsForVendor, resolveAssetIngestion } from "./catalog/assetLocalization";
 import { absolutePathFromLocalAssetUrl, readNomiLocalAsset, postJsonForAssetUpload } from "./assets/localAssetFile";
 import { streamText, tool, type CoreMessage, type LanguageModelV1 } from "ai";
-import { capAgentHistory, createToolCallRepair, maxStepsForSkill } from "./ai/agentChatHarness";
+import { capAgentHistory, createLinkedAbortController, createToolCallRepair, maxStepsForSkill } from "./ai/agentChatHarness";
 import { z } from "zod";
 import { buildAiSdkModel } from "./ai/buildAiSdkModel";
 import { consumeAgentStreamWithTimeout } from "./ai/agentStreamConsumer";
@@ -2295,6 +2295,7 @@ export type AgentChatV2Hooks = {
     toolName: AgentToolName;
     args: unknown;
   }) => Promise<AgentToolConfirmation>;
+  abortSignal?: AbortSignal; // external cancel (user "Stop") → stream abort
 };
 
 // Wraps a tool descriptor so every invocation routes through the
@@ -2491,8 +2492,7 @@ export async function runAgentChatV2(
   const userMessage: CoreMessage = { role: "user", content: userPrompt };
   const messages: CoreMessage[] = [...priorMessages, userMessage];
 
-  // 首字块超时 + 流式消费抽到 ai/agentStreamConsumer（规则 9/12：别喂巨壳）。abortController 同时给 streamText。
-  const abortController = new AbortController();
+  const abortController = createLinkedAbortController(hooks.abortSignal);
   const result = streamText({
     model: languageModel,
     ...(system ? { system } : {}),
