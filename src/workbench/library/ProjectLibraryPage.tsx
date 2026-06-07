@@ -1,5 +1,5 @@
 import React from 'react'
-import { IconFolderOpen, IconMovie, IconSparkles, IconTrash } from '@tabler/icons-react'
+import { IconFolderOpen, IconMovie, IconPlugConnected, IconSparkles, IconTrash } from '@tabler/icons-react'
 import { cn } from '../../utils/cn'
 import { NomiLogoMark } from '../../design'
 import type { LocalProjectSummary } from './localProjectStore'
@@ -12,6 +12,7 @@ type Props = {
   onNewProject: (templateId?: ProjectTemplateId) => void
   onOpenFolder?: () => void
   onTryExample?: (example: TryNowExample) => void
+  onOpenModelCatalog?: () => void
   projects: LocalProjectSummary[]
 }
 
@@ -110,7 +111,7 @@ function ThumbnailMosaic({ urls }: { urls: string[] }): JSX.Element {
   )
 }
 
-export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onNewProject, onOpenFolder, onTryExample, projects }: Props): JSX.Element {
+export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onNewProject, onOpenFolder, onTryExample, onOpenModelCatalog, projects }: Props): JSX.Element {
   const [query, setQuery] = React.useState('')
   const normalizedQuery = query.trim().toLowerCase()
   const filteredProjects = normalizedQuery
@@ -205,6 +206,21 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
             >
               <IconFolderOpen size={16} stroke={1.8} aria-hidden="true" />
               打开已有文件夹
+            </button>
+          ) : null}
+          {onOpenModelCatalog ? (
+            <button
+              type="button"
+              onClick={onOpenModelCatalog}
+              className={cn(
+                'inline-flex items-center gap-1.5 h-8 px-3 rounded-pill cursor-pointer font-inherit',
+                'border border-nomi-line bg-nomi-paper text-nomi-ink-80 text-[13px] transition-colors hover:border-nomi-ink-20',
+              )}
+              aria-label="模型接入"
+              title="接入 AI 模型（填一个 key 即可开始生成）"
+            >
+              <IconPlugConnected size={16} stroke={1.8} aria-hidden="true" />
+              模型接入
             </button>
           ) : null}
         </section>
