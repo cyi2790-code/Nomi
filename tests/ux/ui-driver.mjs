@@ -73,6 +73,7 @@ async function run(cmd) {
     case "snap": return { snap: await snap() };
     case "click": { const r = await click(cmd.target); await win.waitForTimeout(cmd.wait ?? 700); return { ok: r, shot: await shot("live") }; }
     case "fill": { await win.locator(cmd.sel).first().fill(cmd.val, { timeout: 5000 }); await win.waitForTimeout(300); return { ok: true, shot: await shot("live") }; }
+    case "setfile": { await win.locator(cmd.sel).first().setInputFiles(cmd.path, { timeout: 5000 }); await win.waitForTimeout(cmd.wait ?? 800); return { ok: true, shot: await shot("live") }; }
     case "eval": return { value: await win.evaluate(cmd.js) };
     case "wait": await win.waitForTimeout(cmd.ms ?? 500); return { ok: true };
     case "quit": return { quit: true };

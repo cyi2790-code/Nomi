@@ -23,6 +23,7 @@ const cmd = { action };
 if (action === "shot") cmd.name = rest[0];
 else if (action === "click") cmd.target = rest.join(" ");
 else if (action === "fill") { cmd.sel = rest[0]; cmd.val = rest.slice(1).join(" "); }
+else if (action === "setfile") { cmd.sel = rest[0]; cmd.path = rest.slice(1).join(" "); }
 else if (action === "eval") cmd.js = rest.join(" ");
 else if (action === "wait") cmd.ms = Number(rest[0] || 500);
 
