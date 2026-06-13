@@ -568,7 +568,7 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
         />
         <div className={cn('workbench-creation-ai__actions', 'flex items-center justify-between')}>
           {/* 左侧：附件 + 模式 + 模型选择 */}
-          <div className={cn('flex items-center gap-1.5 min-w-0')}>
+          <div className={cn('flex items-center gap-1.5 flex-1 min-w-0')}>
             <WorkbenchIconButton
               className={cn(
                 'workbench-creation-ai__attach',

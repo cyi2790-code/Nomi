@@ -626,7 +626,7 @@ export default function CanvasAssistantPanel({
           onPaste={handlePaste}
         />
         <div className={cn('flex items-center justify-between gap-2')}>
-          <div className={cn('flex items-center gap-2 min-w-0')}>
+          <div className={cn('flex items-center gap-2 flex-1 min-w-0')}>
             <WorkbenchIconButton
               type="button"
               className={cn(
@@ -659,7 +659,7 @@ export default function CanvasAssistantPanel({
               type="button"
               onClick={() => cancelRef.current?.()}
               className={cn(
-                'size-7 grid place-items-center',
+                'size-7 grid place-items-center shrink-0',
                 'border-0 rounded-full bg-nomi-ink text-nomi-paper cursor-pointer',
                 'hover:enabled:bg-nomi-accent',
               )}
@@ -671,7 +671,7 @@ export default function CanvasAssistantPanel({
             <WorkbenchIconButton
               type="submit"
               className={cn(
-                'size-7 grid place-items-center',
+                'size-7 grid place-items-center shrink-0',
                 'border-0 rounded-full bg-nomi-ink text-nomi-paper cursor-pointer',
                 'hover:enabled:bg-nomi-accent',
                 'disabled:bg-nomi-ink-20 disabled:text-nomi-ink-40 disabled:cursor-not-allowed',
