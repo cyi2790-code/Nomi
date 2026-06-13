@@ -59,6 +59,16 @@ describe('validateReferenceEdge — 参考边能力校验', () => {
     expect(validateReferenceEdge(node('v0', 'video'), node('v1', 'video', 'seedance-2'), 'first_frame')).toEqual({ ok: true })
   })
 
+  // i2v 首帧槽声明不统一：kling/veo/wan/sora/seedance-apimart 把首帧输入归到通用 image_ref 数组槽
+  // （i2v 的输入图＝首帧），hailuo/seedance-2 才标 first_frame。first_frame 边对前者必须放行，否则
+  // keyframe→video 边被静默丢弃 → 对账误报「批准已连接/实际未连接」（用户反复撞见的根因）。
+  it.each(['kling-3.0', 'veo-3.1', 'wan-2.7', 'sora-2', 'seedance-2-apimart'])(
+    'first_frame(图片源)→ 视频模型首帧输入归在通用 image_ref 槽(%s) → 放行',
+    (archetypeId) => {
+      expect(validateReferenceEdge(node('k', 'keyframe'), node('v', 'video', archetypeId), 'first_frame')).toEqual({ ok: true })
+    },
+  )
+
   it('character_ref → 视频 omni(seedance 有 image_ref 角色参考槽) → 放行', () => {
     expect(validateReferenceEdge(node('c', 'character'), node('v', 'video', 'seedance-2'), 'character_ref')).toEqual({ ok: true })
   })
