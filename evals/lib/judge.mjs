@@ -11,9 +11,27 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import "./httpProxy.mjs"; // 让 node fetch 走系统代理(否则 vendor 直连被墙超时)
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CONFIG_PATH = path.join(repoRoot, "evals", "judge.config.json");
+
+/**
+ * 容错解析 grader 输出:有的模型(尤其 Claude)即便要求 json_object 仍把 JSON 裹在 ```json 围栏里,
+ * 或前后带说明文字。先剥围栏、再抓首个 {…} 块,最后 JSON.parse。解析不出仍冒泡 error(不静默当 fail)。
+ */
+export function parseJsonLoose(text) {
+  let s = String(text || "").trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  try {
+    return JSON.parse(s);
+  } catch {
+    const brace = s.match(/\{[\s\S]*\}/);
+    if (brace) return JSON.parse(brace[0]);
+    throw new Error(`grader 输出非 JSON: ${s.slice(0, 120)}`);
+  }
+}
 
 export function loadJudgeConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return null;
@@ -113,6 +131,7 @@ export async function judgeOne(cfg, { userMessage, createdNodes, fewshots = [] }
   const body = {
     model: cfg.model,
     temperature: 0,
+    stream: false, // 有的 relay(如 apimart)默认流式 → res.json() 会拿到 SSE 解析失败
     response_format: { type: "json_object" },
     messages: [
       {
@@ -139,7 +158,7 @@ export async function judgeOne(cfg, { userMessage, createdNodes, fewshots = [] }
   const json = await res.json();
   const text = json?.choices?.[0]?.message?.content || "";
   // grader 输出解析失败必须冒泡为 error,不静默当 fail(抄 promptfoo 纪律)
-  const parsed = JSON.parse(text);
+  const parsed = parseJsonLoose(text);
   if (!parsed.scores || typeof parsed.scores !== "object") {
     throw new Error(`judge 输出缺 scores 字段: ${text.slice(0, 120)}`);
   }
