@@ -212,6 +212,24 @@ describe('migrateProjectPayload', () => {
     expect(next.generationCanvas.nodes.map((node) => node.kind).sort()).toEqual(['image', 'text'])
   })
 
+  it('treats a content-equal but newly-referenced canvas as already migrated (语义相等，不靠引用)', () => {
+    // 幂等判定改语义相等（P2）：即便上游迁移返回了「内容一致但引用不同」的画布，
+    // migrateProjectPayload 也应判 alreadyMigrated=true，不再因引用变化触发 re-save+revision++。
+    const base = createDefaultWorkbenchProjectPayload()
+    // 深拷贝 → 全新引用、内容完全一致。
+    const cloned = {
+      ...base,
+      generationCanvas: JSON.parse(JSON.stringify(base.generationCanvas)) as typeof base.generationCanvas,
+      categories: base.categories ? [...base.categories] : base.categories,
+    }
+    expect(cloned.generationCanvas).not.toBe(base.generationCanvas)
+
+    const { diagnostic } = migrateProjectPayload(cloned)
+    expect(diagnostic.alreadyMigrated).toBe(true)
+    expect(diagnostic.migratedNodes).toBe(0)
+    expect(diagnostic.removedNodes).toBe(0)
+  })
+
   it('does not merge legacy category ids back into normalized project categories', () => {
     const categories = normalizeCategories([
       { id: 'shots', name: 'Shots', icon: '🎬', order: 0 },

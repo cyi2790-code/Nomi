@@ -14,6 +14,52 @@ import { backfillShotIndexes } from '../generationCanvas/model/shotNumbering'
 
 let lastCategoryMigrationDiagnostic: CategoryMigrationDiagnostic | null = null
 
+// 迁移幂等的语义相等（P2 根因 / 守纪律「幂等判定用语义相等不用引用相等」）：
+// hydrate 时串行跑多道迁移，其中任一道（如 v51→v60 把跨分类 derivedFrom 计入 anyChange，
+// 或任何返回 `{ ...record }` 的 no-op）都会换掉顶层引用，于是旧的 `upgraded !== project`
+// 判定恒为 true → 每次打开都 re-save → revision 单调漂移（实测漂到 706）+ 反复弹「已升级」
+// toast。改用对「会落盘的内容」做深比较：真无变更就不写盘、不 ++revision。
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** 结构化深比较：plain object（忽略 key 顺序，跳过值为 undefined 的键）/ array / 基本类型。 */
+function deepValueEquals(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    return a.every((item, index) => deepValueEquals(item, b[index]))
+  }
+  if (isPlainRecord(a) && isPlainRecord(b)) {
+    const keysA = Object.keys(a).filter((key) => a[key] !== undefined)
+    const keysB = Object.keys(b).filter((key) => b[key] !== undefined)
+    if (keysA.length !== keysB.length) return false
+    return keysA.every((key) => Object.prototype.hasOwnProperty.call(b, key) && deepValueEquals(a[key], b[key]))
+  }
+  return false
+}
+
+/** 两份 payload 语义是否一致（引用无关、key 顺序无关）。 */
+export function workbenchPayloadSemanticEquals(a: WorkbenchProjectPayload, b: WorkbenchProjectPayload): boolean {
+  return deepValueEquals(a, b)
+}
+
+/**
+ * 迁移后的记录是否「真的需要写盘」。只看会被持久化且语义相关的字段：
+ * - name（用户可见）
+ * - payload（画布/时间轴/文档/分类等全部内容）
+ * 刻意不比较 revision/savedAt/updatedAt 这类 bookkeeping 元字段——它们由保存动作本身产生，
+ * 不该反过来触发又一次保存（否则就是自激振荡）。
+ */
+export function migratedRecordNeedsPersist(
+  original: WorkbenchProjectRecordV1,
+  upgraded: WorkbenchProjectRecordV1,
+): boolean {
+  if (Object.is(original, upgraded)) return false
+  if (original.name !== upgraded.name) return true
+  return !workbenchPayloadSemanticEquals(original.payload, upgraded.payload)
+}
+
 /** Returns + clears the most recent Phase E4 migration diagnostic (for toast UI). */
 export function consumeCategoryMigrationDiagnostic(): CategoryMigrationDiagnostic | null {
   const value = lastCategoryMigrationDiagnostic
@@ -100,8 +146,10 @@ export function createWorkbenchProjectPersistenceService(deps: Dependencies): Wo
           },
         }
       : assetUpgraded
-    const changed = upgraded !== project
-    if (!diagnostic.alreadyMigrated && (diagnostic.migratedNodes > 0 || diagnostic.removedNodes > 0 || diagnostic.categoriesSeeded)) {
+    // 语义相等判定（不再用引用相等）：多道迁移即便换了顶层引用，只要落盘内容没变就
+    // 不写盘、不 ++revision、不弹「已升级」toast。修 revision 单调漂移根因。
+    const changed = migratedRecordNeedsPersist(project, upgraded)
+    if (changed && !diagnostic.alreadyMigrated && (diagnostic.migratedNodes > 0 || diagnostic.removedNodes > 0 || diagnostic.categoriesSeeded)) {
       lastCategoryMigrationDiagnostic = diagnostic
     }
     if (changed) {

@@ -76,6 +76,28 @@ function unique(values: readonly string[]): string[] {
   return Array.from(new Set(values))
 }
 
+// 幂等判定用语义相等而非引用相等（P2）：迁移结果与输入做结构化深比较，这样即便上游
+// 换了「内容一致但引用不同」的画布，alreadyMigrated 也能正确判 true，不会因引用变化触发
+// 整链 changed → re-save → revision 漂移。只比较 JSON 可序列化的画布数据。
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function deepEquals(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    return a.every((item, index) => deepEquals(item, b[index]))
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keysA = Object.keys(a).filter((key) => a[key] !== undefined)
+    const keysB = Object.keys(b).filter((key) => b[key] !== undefined)
+    if (keysA.length !== keysB.length) return false
+    return keysA.every((key) => Object.prototype.hasOwnProperty.call(b, key) && deepEquals(a[key], b[key]))
+  }
+  return false
+}
+
 function normalizeGroups(input: unknown, existingNodeIds: ReadonlySet<string>): { groups: NodeGroup[]; changed: boolean } {
   if (!Array.isArray(input)) return { groups: [], changed: true }
   const groups: NodeGroup[] = []
@@ -185,8 +207,11 @@ export function migrateProjectPayload(payload: WorkbenchProjectPayload): {
   const categoryIds = payload.categories?.map((category) => category.id) || []
   const nextCategoryIds = categoryNormalization.categories?.map((category) => category.id) || []
   const categoriesChanged = categoryIds.length !== nextCategoryIds.length || categoryIds.some((id, index) => id !== nextCategoryIds[index])
-  const alreadyMigrated = !categoriesChanged && nodeMigration.snapshot === payload.generationCanvas &&
-    nodeMigration.migratedCount === 0 && nodeMigration.removedCount === 0
+  // 语义相等（不靠 nodeMigration.snapshot === payload.generationCanvas 引用相等）：
+  // 节点零迁移/零删除，且画布结构（节点/边/选择/分组）与输入深比较一致 → 已迁移。
+  const alreadyMigrated = !categoriesChanged &&
+    nodeMigration.migratedCount === 0 && nodeMigration.removedCount === 0 &&
+    deepEquals(nodeMigration.snapshot, payload.generationCanvas)
   if (alreadyMigrated) {
     return {
       payload,

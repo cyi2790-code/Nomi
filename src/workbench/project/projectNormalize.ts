@@ -12,14 +12,32 @@ import {
 import type { GenerationCanvasNode } from "../generationCanvas/model/generationCanvasTypes";
 import { normalizeCategories } from "./projectCategories";
 
+/**
+ * 从画布节点的生成产物（result.url / result.thumbnailUrl）派生项目封面 url（最多 max 个）。
+ *
+ * 单一来源关系（P4 / 缩略图唯一真相源）：本函数是渲染侧（src）的封面派生真相源；
+ * 主进程侧 `electron/workspace/workspaceRepository.ts` 的 `deriveThumbnailUrls` 是同一逻辑
+ * 的 main 副本（桌面 list 不经渲染层、直接读 manifest 派生封面）。两份必须保持等价：
+ * 取前若干「有产物」节点、过滤过短 url（length <= 4）、对脏数据健壮降级。
+ * TODO(收口): 抽到一个跨进程共享的纯函数模块，消除这份 main/renderer 双份派生
+ *   （workspaceRepository 在本任务作用域外，暂以「逻辑等价 + 注释锚定」保证一致）。
+ *
+ * 无产物降级：示例项目 / 空项目 / 脏节点时返回明确的空标记 `[]`——这是给 UI 的
+ * 「此项目暂无封面，请用占位（thumbStyle 渐变 / 空 mosaic）」信号，而不是抛错或返回脏值。
+ */
 export function extractCanvasThumbnailUrls(
     nodes: GenerationCanvasNode[],
     max = 4,
 ): string[] {
+    // 降级：非数组（undefined / null / 残缺记录）→ 空标记，不崩。与 main 侧 Array.isArray 守卫等价。
+    if (!Array.isArray(nodes)) return [];
     const urls: string[] = [];
     for (const node of nodes) {
         if (urls.length >= max) break;
-        const url = node.result?.url || node.result?.thumbnailUrl;
+        // 脏数据健壮：数组里混入 null / 非对象节点时跳过，不读 .result 触发崩溃。
+        if (!node || typeof node !== "object") continue;
+        const result = (node as GenerationCanvasNode).result;
+        const url = result?.url || result?.thumbnailUrl;
         if (typeof url === "string" && url.length > 4) urls.push(url);
     }
     return urls;
