@@ -11,7 +11,7 @@ export type GenerationNodeRenderProps<TNode = unknown> = {
 export type GenerationNodeComponent = ComponentType<
     GenerationNodeRenderProps<any>
 >;
-export type GenerationNodeExecutionKind = "image" | "video" | "text";
+export type GenerationNodeExecutionKind = "image" | "video" | "text" | "audio";
 export type GenerationNodeIconKey =
     | "text"
     | "character"
@@ -22,7 +22,8 @@ export type GenerationNodeIconKey =
     | "shot"
     | "output"
     | "panorama"
-    | "scene3d";
+    | "scene3d"
+    | "audio";
 
 export type GenerationNodePluginDefinition<TKind extends string = string> = {
     kind: TKind;

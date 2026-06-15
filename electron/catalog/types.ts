@@ -13,7 +13,8 @@ export type ProfileKind =
   | "text_to_video"
   | "image_edit"
   | "text_to_audio"
-  | "image_to_audio";
+  | "image_to_audio"
+  | "transcribe";
 
 // openai-responses：OpenAI Responses API（/responses，非 /chat/completions）。
 // 中转（如 foxcode codex 渠道 wire_api=responses）只认 Responses → chat/completions 会 502（2026-06-06 实测根因）。

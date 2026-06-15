@@ -62,8 +62,7 @@ function AudioStripNodeImpl({ node }: Props): JSX.Element {
   const audioRef = React.useRef<HTMLAudioElement | null>(null)
   const [isPlaying, setPlaying] = React.useState(false)
 
-  // v0.7.1: 上传音频 — 用 dataURL 存进 result.url，type 暂用 'image' 占位（schema 未扩 'audio'）
-  // categoryId='audio' 是真正的派发依据，buildClipFromGenerationNode 看 categoryId 决定 clip.type='audio'
+  // 上传音频 — 用 dataURL 存进 result.url，type='audio'（schema 已扩 'audio'，不再伪装 image）。
   const handleUpload = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0]
     event.currentTarget.value = ''
@@ -75,7 +74,7 @@ function AudioStripNodeImpl({ node }: Props): JSX.Element {
       const dataUrl = loadEvent.target?.result
       if (typeof dataUrl !== 'string') return
       updateNode(node.id, {
-        result: { id: `upload-audio-${createdAt}`, type: 'image', url: dataUrl, createdAt },
+        result: { id: `upload-audio-${createdAt}`, type: 'audio', url: dataUrl, createdAt },
         meta: { ...(node.meta || {}), audioFilename: file.name, audioMime: file.type },
       })
     }
@@ -83,7 +82,7 @@ function AudioStripNodeImpl({ node }: Props): JSX.Element {
     void persistNodeImageFile(file, node.id).then((localUrl) => {
       if (!localUrl) return
       updateNode(node.id, {
-        result: { id: `upload-audio-asset-${createdAt}`, type: 'image', url: localUrl, createdAt },
+        result: { id: `upload-audio-asset-${createdAt}`, type: 'audio', url: localUrl, createdAt },
       })
     })
   }, [node.id, node.meta, updateNode])

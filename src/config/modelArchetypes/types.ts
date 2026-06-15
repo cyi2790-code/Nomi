@@ -85,7 +85,7 @@ export type ModelArchetype = {
   id: string; // 'seedance-2'
   family: string; // 'seedance'
   label: string; // 'Seedance 2.0'
-  kind: "video" | "image";
+  kind: "video" | "image" | "audio";
   modes: ArchetypeMode[];
   defaultModeId: string;
   /** 该档案默认打到哪个 mapping 桶（显式，不靠启发式）。图像档案可被 mode.transportTaskKind 覆盖。 */

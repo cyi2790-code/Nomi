@@ -123,7 +123,7 @@ export type TaskResult = {
   kind: ProfileKind;
   status: "queued" | "running" | "succeeded" | "failed";
   assets: Array<{
-    type: "image" | "video";
+    type: "image" | "video" | "audio";
     url: string;
     thumbnailUrl?: string | null;
     assetId?: string | null;
@@ -368,6 +368,10 @@ function authHeaders(vendor: Vendor, apiKey: string): Record<string, string> {
 export function billingKindForTaskKind(kind: ProfileKind): BillingModelKind {
   if (kind === "text_to_video" || kind === "image_to_video") return "video";
   if (kind === "chat" || kind === "prompt_refine" || kind === "image_to_prompt") return "text";
+  // 音频族：TTS(text_to_audio,文字转语音) / Whisper(transcribe,音频转文字) / image_to_audio
+  // 都按 audio 模型寻址（whisper 输出虽是文本，但模型本身归 audio 类）。结果落地走 runtime 的
+  // 第四路 audio 同步收口，不经此函数的 image/video 二选一。
+  if (kind === "text_to_audio" || kind === "image_to_audio" || kind === "transcribe") return "audio";
   return "image";
 }
 
@@ -390,16 +394,21 @@ function extractAssetUrl(raw: unknown): string {
   return firstString(...candidates);
 }
 
-async function localizeTaskAsset(projectId: string, assetUrl: string, type: "image" | "video", nodeId?: string): Promise<TaskResult["assets"][number]> {
+const REMOTE_ASSET_EXT: Record<"image" | "video" | "audio", string> = { image: "png", video: "mp4", audio: "mp3" };
+
+async function localizeTaskAsset(projectId: string, assetUrl: string, type: "image" | "video" | "audio", nodeId?: string): Promise<TaskResult["assets"][number]> {
   const imported = await importRemoteAsset({
     projectId,
     url: assetUrl,
     kind: "generated",
     ownerNodeId: nodeId || null,
-    fileName: `${type}-${Date.now()}.${type === "image" ? "png" : "mp4"}`,
+    fileName: `${type}-${Date.now()}.${REMOTE_ASSET_EXT[type]}`,
   }) as { id?: string; name?: string; data?: { url?: string; absolutePath?: string } };
   // S4-2b V-a:落地后异步技术自检(黑帧/静音/解码),fire-and-forget 绝不挡结果呈现。
-  scheduleTechnicalReview({ projectId, nodeId, absolutePath: String(imported.data?.absolutePath || ""), assetUrl: String(imported.data?.url || assetUrl), type });
+  // 仅图像/视频做帧级自检；音频暂不走（无黑帧概念，静音检测另作）。
+  if (type !== "audio") {
+    scheduleTechnicalReview({ projectId, nodeId, absolutePath: String(imported.data?.absolutePath || ""), assetUrl: String(imported.data?.url || assetUrl), type });
+  }
   return {
     type,
     url: String(imported.data?.url || assetUrl),

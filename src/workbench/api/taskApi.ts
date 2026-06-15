@@ -9,11 +9,13 @@ export type TaskKind =
   | 'image_to_video'
   | 'text_to_video'
   | 'image_edit'
+  | 'text_to_audio'
+  | 'transcribe'
 
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed'
 
 export type TaskAssetDto = {
-  type: 'image' | 'video'
+  type: 'image' | 'video' | 'audio'
   url: string
   thumbnailUrl?: string | null
   assetId?: string | null

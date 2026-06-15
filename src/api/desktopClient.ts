@@ -34,6 +34,7 @@ export type ProfileKind =
   | 'image_edit'
   | 'text_to_audio'
   | 'image_to_audio'
+  | 'transcribe'
 
 export type ModelCatalogVendorAuthType = 'none' | 'bearer' | 'x-api-key' | 'query'
 export type ModelCatalogVendorProviderKind = ProviderKind

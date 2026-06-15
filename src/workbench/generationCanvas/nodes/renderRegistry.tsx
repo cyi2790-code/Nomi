@@ -8,6 +8,7 @@ import {
   IconPhoto,
   IconUser,
   IconVideo,
+  IconWaveSine,
   IconWriting,
 } from '@tabler/icons-react'
 import {
@@ -39,6 +40,7 @@ const NODE_ICONS: Record<GenerationNodeIconKey, GenerationNodeIcon> = {
   output: IconFlag,
   panorama: Icon360,
   scene3d: IconCube,
+  audio: IconWaveSine,
 }
 
 const lazyComponents = new Map<GenerationNodeKind, React.LazyExoticComponent<GenerationNodeComponent>>()

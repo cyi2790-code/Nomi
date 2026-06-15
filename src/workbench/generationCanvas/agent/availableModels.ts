@@ -41,7 +41,7 @@ export type AgentModelEntry = {
   modelAlias: string | null;
   vendor: string | null;
   label: string;
-  kind: "image" | "video";
+  kind: "image" | "video" | "audio";
   archetypeId: string;
   defaultModeId: string;
   modes: AgentModelMode[];
