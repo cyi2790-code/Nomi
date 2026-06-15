@@ -2220,7 +2220,7 @@ function VectorInputs({
         {value.map((part, index) => (
           <input
             key={index}
-            className="h-8 min-w-0 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none focus:border-[var(--nomi-accent)] disabled:opacity-50"
+            className="h-8 min-w-0 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none focus:border-[var(--nomi-accent)] disabled:opacity-50"
             disabled={disabled}
             type="number"
             step="0.1"
@@ -2269,7 +2269,7 @@ function ColorField({
         </label>
         <input
           aria-label={`${label}值`}
-          className="h-8 min-w-0 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-ink-05)] px-2 font-mono text-caption font-medium uppercase text-[var(--nomi-ink)] outline-none disabled:opacity-50"
+          className="h-8 min-w-0 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-ink-05)] px-2 font-mono text-caption font-medium uppercase text-[var(--nomi-ink)] outline-none disabled:opacity-50"
           disabled={disabled}
           readOnly
           value={displayValue}
@@ -2359,7 +2359,7 @@ function SceneObjectList({
               >
                 {isCrowd ? (
                   <button
-                    className="grid size-6 place-items-center rounded-[6px] text-[var(--nomi-ink-45)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)]"
+                    className="grid size-6 place-items-center rounded-nomi-sm text-[var(--nomi-ink-45)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)]"
                     type="button"
                     title={crowdExpanded ? '收起群众' : '展开群众'}
                     onClick={() => setExpandedCrowds((current) => ({ ...current, [row.id]: !crowdExpanded }))}
@@ -2370,7 +2370,7 @@ function SceneObjectList({
                   <span aria-hidden="true" className="size-6" />
                 )}
                 <button
-                  className="grid size-6 place-items-center rounded-[6px] text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)]"
+                  className="grid size-6 place-items-center rounded-nomi-sm text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)]"
                   type="button"
                   title="聚焦"
                   onClick={() => onFocus(row.id)}
@@ -2380,7 +2380,7 @@ function SceneObjectList({
                 {renaming === row.id ? (
                   <input
                     autoFocus
-                    className="h-7 min-w-0 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
+                    className="h-7 min-w-0 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
                     defaultValue={row.name}
                     onBlur={(event) => {
                       const name = event.currentTarget.value.trim()
@@ -2405,7 +2405,7 @@ function SceneObjectList({
                   </button>
                 )}
                 <button
-                  className="grid size-7 place-items-center rounded-[6px] text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)] disabled:opacity-40"
+                  className="grid size-7 place-items-center rounded-nomi-sm text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)] disabled:opacity-40"
                   disabled={readOnly}
                   type="button"
                   title={row.visible ? '隐藏' : '显示'}
@@ -2417,7 +2417,7 @@ function SceneObjectList({
                   {row.visible ? <IconEye size={14} /> : <IconEyeOff size={14} />}
                 </button>
                 <button
-                  className="grid size-7 place-items-center rounded-[6px] text-[var(--nomi-ink-45)] hover:bg-[var(--workbench-danger-soft)] hover:text-[var(--workbench-danger)] disabled:opacity-40"
+                  className="grid size-7 place-items-center rounded-nomi-sm text-[var(--nomi-ink-45)] hover:bg-[var(--workbench-danger-soft)] hover:text-[var(--workbench-danger)] disabled:opacity-40"
                   disabled={readOnly}
                   type="button"
                   title="删除"
@@ -2443,7 +2443,7 @@ function SceneObjectList({
                         title="群众成员不可单独调整"
                         onClick={() => onSelect({ type: 'object', id: row.id })}
                       >
-                        <span className="grid size-6 place-items-center rounded-[6px] text-[var(--nomi-ink-45)]">
+                        <span className="grid size-6 place-items-center rounded-nomi-sm text-[var(--nomi-ink-45)]">
                           <IconUser size={13} />
                         </span>
                         <span className="flex min-w-0 items-center gap-2">
@@ -2453,7 +2453,7 @@ function SceneObjectList({
                           />
                           <span className="min-w-0 truncate text-caption">{mannequinRoleLabel(roleIndex)}</span>
                         </span>
-                        <span className="justify-self-end rounded-[5px] bg-[var(--nomi-ink-05)] px-1.5 py-0.5 text-[10px] text-[var(--nomi-ink-45)]">
+                        <span className="justify-self-end rounded-[5px] bg-[var(--nomi-ink-05)] px-1.5 py-0.5 text-micro text-[var(--nomi-ink-45)]">
                           只读
                         </span>
                       </button>
@@ -2639,7 +2639,7 @@ function PropertyPanel({
                 <button
                   key={tab}
                   className={cn(
-                    'h-7 rounded-[6px] text-caption text-[var(--nomi-ink-60)] transition hover:bg-[var(--nomi-paper)] hover:text-[var(--nomi-ink)]',
+                    'h-7 rounded-nomi-sm text-caption text-[var(--nomi-ink-60)] transition hover:bg-[var(--nomi-paper)] hover:text-[var(--nomi-ink)]',
                     objectInspectorTab === tab && 'bg-[var(--nomi-paper)] text-[var(--nomi-ink)] shadow-sm',
                   )}
                   type="button"
@@ -2657,7 +2657,7 @@ function PropertyPanel({
           <label className="grid gap-1">
             <span className="text-micro text-[var(--nomi-ink-60)]">名称</span>
             <input
-              className="h-8 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none focus:border-[var(--nomi-accent)] disabled:opacity-50"
+              className="h-8 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none focus:border-[var(--nomi-accent)] disabled:opacity-50"
               disabled={readOnly}
               value={selectedObject.name}
               onChange={(event) => onObjectPatch(selectedObject.id, { name: event.currentTarget.value })}
@@ -2676,7 +2676,7 @@ function PropertyPanel({
                 <label key={field} className="grid gap-1">
                   <span className="text-micro text-[var(--nomi-ink-60)]">{label}</span>
                   <input
-                    className="h-8 min-w-0 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
+                    className="h-8 min-w-0 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
                     disabled={readOnly}
                     max={max}
                     min={min}
@@ -2713,7 +2713,7 @@ function PropertyPanel({
               <label className="grid gap-1">
                 <span className="text-micro text-[var(--nomi-ink-60)]">强度</span>
                 <input
-                  className="h-8 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
+                  className="h-8 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
                   disabled={readOnly}
                   min={0}
                   step={0.1}
@@ -2738,7 +2738,7 @@ function PropertyPanel({
           <label className="grid gap-1">
             <span className="text-micro text-[var(--nomi-ink-60)]">名称</span>
             <input
-              className="h-8 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none focus:border-[var(--nomi-accent)] disabled:opacity-50"
+              className="h-8 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none focus:border-[var(--nomi-accent)] disabled:opacity-50"
               disabled={readOnly}
               value={selectedCamera.name}
               onChange={(event) => onCameraPatch(selectedCamera.id, { name: event.currentTarget.value })}
@@ -2773,7 +2773,7 @@ function PropertyPanel({
               <label key={field} className="grid gap-1">
                 <span className="text-micro text-[var(--nomi-ink-60)]">{field.toUpperCase()}</span>
                 <input
-                  className="h-8 min-w-0 rounded-[6px] border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
+                  className="h-8 min-w-0 rounded-nomi-sm border border-[var(--nomi-line)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--nomi-ink)] outline-none"
                   disabled={readOnly}
                   min={field === 'fov' ? 12 : 0.01}
                   step={field === 'fov' ? 1 : 0.1}
@@ -3030,7 +3030,7 @@ function CameraPreview({
         <div className="flex shrink-0 items-center gap-1">
           <button
             className={cn(
-              'inline-flex h-7 items-center gap-1 rounded-[6px] px-2 text-micro hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)] disabled:opacity-40',
+              'inline-flex h-7 items-center gap-1 rounded-nomi-sm px-2 text-micro hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)] disabled:opacity-40',
               cameraViewEditing ? 'bg-[var(--nomi-ink)] text-[var(--nomi-paper)]' : 'bg-[var(--nomi-ink-05)] text-[var(--nomi-ink-60)]',
             )}
             disabled={readOnly}
@@ -3042,7 +3042,7 @@ function CameraPreview({
             <span>取景</span>
           </button>
           <button
-            className="grid size-7 place-items-center rounded-[6px] bg-[var(--nomi-ink-05)] text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)] disabled:opacity-40"
+            className="grid size-7 place-items-center rounded-nomi-sm bg-[var(--nomi-ink-05)] text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)] disabled:opacity-40"
             disabled={readOnly}
             type="button"
             title="水平摆正"
@@ -3050,12 +3050,12 @@ function CameraPreview({
           >
             <IconRotate size={14} />
           </button>
-          <button className="grid size-7 place-items-center rounded-[6px] bg-[var(--nomi-ink-05)] text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)]" type="button" title="相机截图" onClick={onScreenshot}>
+          <button className="grid size-7 place-items-center rounded-nomi-sm bg-[var(--nomi-ink-05)] text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)]" type="button" title="相机截图" onClick={onScreenshot}>
             <IconCamera size={15} />
           </button>
         </div>
       </div>
-      <div className="flex min-h-[126px] items-center justify-center rounded-[6px] border border-[var(--nomi-line-soft)] bg-[var(--nomi-ink-05)] p-1">
+      <div className="flex min-h-[126px] items-center justify-center rounded-nomi-sm border border-[var(--nomi-line-soft)] bg-[var(--nomi-ink-05)] p-1">
         <div className="overflow-hidden rounded-[5px] bg-[var(--nomi-ink)]" style={previewStyle}>
           <Canvas
             camera={{
@@ -3078,7 +3078,7 @@ function CameraPreview({
           <button
             key={option}
             className={cn(
-              'h-6 rounded-[5px] border border-[var(--nomi-line-soft)] text-[10px] text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)]',
+              'h-6 rounded-[5px] border border-[var(--nomi-line-soft)] text-micro text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-05)] hover:text-[var(--nomi-ink)]',
               option === camera.aspectRatio && 'bg-[var(--nomi-ink)] text-[var(--nomi-paper)]',
             )}
             disabled={readOnly}
@@ -3104,7 +3104,7 @@ function CameraPreview({
           value={lensDepth}
           onChange={(event) => onLensDepthChange(Number(event.currentTarget.value))}
         />
-        <div className="mt-1 grid grid-cols-3 text-[10px] text-[var(--nomi-ink-45)]">
+        <div className="mt-1 grid grid-cols-3 text-micro text-[var(--nomi-ink-45)]">
           <span>-100%</span>
           <span className="text-center">0</span>
           <span className="text-right">100%</span>
@@ -3767,7 +3767,7 @@ export default function Scene3DFullscreen({
               <IconCamera size={15} className="text-[var(--nomi-ink-60)]" />
               <span className="max-w-[220px] truncate">取景调整 · {cameraViewEditCamera.name}</span>
               <button
-                className="rounded-[6px] bg-[var(--nomi-ink-05)] px-2 py-1 text-micro text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)]"
+                className="rounded-nomi-sm bg-[var(--nomi-ink-05)] px-2 py-1 text-micro text-[var(--nomi-ink-60)] hover:bg-[var(--nomi-ink-10)] hover:text-[var(--nomi-ink)]"
                 type="button"
                 onClick={exitCameraViewEdit}
               >
@@ -3775,7 +3775,7 @@ export default function Scene3DFullscreen({
               </button>
             </div>
           ) : null}
-          <div className="pointer-events-none absolute bottom-4 left-4 grid size-20 place-items-center rounded-[8px] border border-[var(--nomi-line-soft)] bg-[var(--nomi-paper)] text-[10px] text-[var(--nomi-ink-60)] shadow-[var(--nomi-shadow-md)]">
+          <div className="pointer-events-none absolute bottom-4 left-4 grid size-20 place-items-center rounded-[8px] border border-[var(--nomi-line-soft)] bg-[var(--nomi-paper)] text-micro text-[var(--nomi-ink-60)] shadow-[var(--nomi-shadow-md)]">
             <div className="grid gap-1">
               <span className="text-red-300">X</span>
               <span className="text-green-300">Y</span>

@@ -61,7 +61,7 @@ export default function GroupItem({ group, nodes, selectedNodeIds, editing = fal
     >
       {editing ? (
         <div className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-micro text-nomi-ink-60">
-          <span className="w-3 text-[10px] text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
+          <span className="w-3 text-micro text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
           <span
             className="h-2.5 w-2.5 rounded-full border border-nomi-line shrink-0"
             style={{ backgroundColor: group.color || 'rgba(160, 132, 90, 0.18)' }}
@@ -95,14 +95,14 @@ export default function GroupItem({ group, nodes, selectedNodeIds, editing = fal
           )}
           title={group.name}
         >
-          <span className="w-3 text-[10px] text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
+          <span className="w-3 text-micro text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
           <span
             className="h-2.5 w-2.5 rounded-full border border-nomi-line shrink-0"
             style={{ backgroundColor: group.color || 'rgba(160, 132, 90, 0.18)' }}
             aria-hidden
           />
           <span className="min-w-0 flex-1 truncate">{group.name}</span>
-          <span className="shrink-0 tabular-nums text-[10px] text-nomi-ink-40">{nodes.length}</span>
+          <span className="shrink-0 tabular-nums text-micro text-nomi-ink-40">{nodes.length}</span>
         </button>
       )}
       {expanded ? (

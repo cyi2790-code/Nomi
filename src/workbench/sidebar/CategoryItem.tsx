@@ -50,7 +50,7 @@ export default function CategoryItem({ category, count, active, collapsed, expan
     const Icon = getCategoryIcon(category.iconName)
     return (
       <div className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md border border-nomi-accent/30 bg-nomi-accent/10 text-caption">
-        <span className="w-3 shrink-0 text-[10px] text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
+        <span className="w-3 shrink-0 text-micro text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
         <Icon size={16} stroke={1.5} className="shrink-0" aria-hidden />
         <input
           autoFocus
@@ -91,7 +91,7 @@ export default function CategoryItem({ category, count, active, collapsed, expan
       )}
     >
       {!collapsed ? (
-        <span className="w-3 shrink-0 text-[10px] text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
+        <span className="w-3 shrink-0 text-micro text-nomi-ink-40" aria-hidden>{expanded ? '▾' : '▸'}</span>
       ) : null}
       {(() => {
         const Icon = getCategoryIcon(category.iconName)
@@ -114,7 +114,7 @@ export default function CategoryItem({ category, count, active, collapsed, expan
       {collapsed && count > 0 ? (
         <span
           className={cn(
-            'absolute -mt-5 ml-3 rounded-full bg-nomi-accent text-white text-[9px] leading-none',
+            'absolute -mt-5 ml-3 rounded-full bg-nomi-accent text-white text-micro leading-none',
             'px-1.5 py-[2px] tabular-nums',
           )}
           aria-hidden

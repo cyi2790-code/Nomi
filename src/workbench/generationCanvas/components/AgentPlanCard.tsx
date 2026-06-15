@@ -60,9 +60,9 @@ function PendingChip({ label, value }: { label?: string; value: string }): JSX.E
         'border border-nomi-accent bg-nomi-accent-soft text-nomi-accent text-micro font-medium',
       )}
     >
-      {label ? <span className={cn('text-[10px] text-nomi-accent/70')}>{label}</span> : null}
+      {label ? <span className={cn('text-micro text-nomi-accent/70')}>{label}</span> : null}
       <span className={cn('truncate max-w-[120px]')}>{value}</span>
-      <span className={cn('text-[9px] text-nomi-accent/60')}>▾</span>
+      <span className={cn('text-micro text-nomi-accent/60')}>▾</span>
     </span>
   )
 }
@@ -109,7 +109,7 @@ function PlanNodeRow({
             {refTitles.map((title) => (
               <span
                 key={title}
-                className={cn('inline-flex items-center h-[18px] px-[7px] rounded-full bg-nomi-ink-05 text-nomi-ink-60 text-[10px] font-semibold')}
+                className={cn('inline-flex items-center h-[18px] px-[7px] rounded-full bg-nomi-ink-05 text-nomi-ink-60 text-micro font-semibold')}
               >
                 {title}
               </span>

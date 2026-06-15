@@ -515,7 +515,7 @@ function BaseGenerationNodeImpl({
                         "generation-canvas-v2-node__panorama-toolbar",
                         "absolute left-1/2 bottom-[calc(100%+18px)] z-[12]",
                         "inline-flex items-center gap-1 min-h-[44px] py-[5px] px-2",
-                        "border border-[rgba(18,24,38,0.08)] rounded-[14px]",
+                        "border border-[rgba(18,24,38,0.08)] rounded-nomi-lg",
                         "bg-white/[0.96] shadow-[0_12px_34px_rgba(18,24,38,0.14)]",
                         "-translate-x-1/2 backdrop-blur-[12px]",
                     )}
@@ -600,7 +600,7 @@ function BaseGenerationNodeImpl({
                 {showStatusBadge ? (
                     <span
                         className={cn(
-                            "text-[10.5px] font-medium tracking-[0.06em] uppercase",
+                            "text-micro font-medium tracking-[0.06em] uppercase",
                             "py-[3px] px-2 rounded-[4px] backdrop-blur-[8px]",
                             "bg-nomi-paper/[0.82] text-nomi-ink-60",
                             "data-[status=success]:text-workbench-success-ink data-[status=success]:bg-workbench-success-soft",

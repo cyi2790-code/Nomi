@@ -163,7 +163,7 @@ function AudioStripNodeImpl({ node }: Props): JSX.Element {
             className={cn(
               'inline-flex w-fit rounded-full px-2 py-[1px]',
               'bg-nomi-accent-soft text-nomi-accent',
-              'text-[10px] font-medium',
+              'text-micro font-medium',
             )}
           >
             {audioKindLabel}

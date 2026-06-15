@@ -307,7 +307,7 @@ export default function TimelinePanel({ density = 'compact', regionLabel, action
             <div className="absolute top-0 bottom-0 left-0 w-px -translate-x-1/2 bg-[repeating-linear-gradient(var(--nomi-snap)_0_4px,transparent_4px_8px)]" />
             <span className={cn(
               'absolute top-0.5 left-1 px-1 rounded-[3px] whitespace-nowrap',
-              'font-mono text-[9.5px] leading-[14px] text-[var(--nomi-paper)] bg-[var(--nomi-snap-tag)]',
+              'font-mono text-micro leading-[14px] text-[var(--nomi-paper)] bg-[var(--nomi-snap-tag)]',
             )}>{snapGuide.label}</span>
           </div>
         ) : null}

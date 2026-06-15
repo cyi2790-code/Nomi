@@ -73,7 +73,7 @@ export default function FileTreeNode({ node, projectId, depth = 0 }: Props): JSX
         style={{ paddingLeft: 6 + depth * 12 }}
         title={node.relativePath}
       >
-        <span className="w-7 shrink-0 text-[9px] text-nomi-ink-40">{hasChildren ? (expanded ? '▾' : '▸') : icon(node.kind)}</span>
+        <span className="w-7 shrink-0 text-micro text-nomi-ink-40">{hasChildren ? (expanded ? '▾' : '▸') : icon(node.kind)}</span>
         <span className="truncate">{label}</span>
       </button>
       {hasChildren && expanded ? (
