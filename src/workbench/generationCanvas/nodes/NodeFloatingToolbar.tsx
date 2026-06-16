@@ -105,8 +105,10 @@ export function ToolbarMenu({ icon, label, items, disabled }: { icon: React.Reac
     const onDown = (event: PointerEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false)
     }
-    document.addEventListener('pointerdown', onDown)
-    return () => document.removeEventListener('pointerdown', onDown)
+    // 捕获阶段：浮条外壳 onPointerDown stopPropagation（防画布平移）会截断冒泡，导致点另一个菜单按钮时
+    // 本菜单的「点外关闭」收不到事件 → 两个下拉同时开、互相遮挡。捕获在 stopPropagation 之前触发，绕过它。
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
   }, [open])
   return (
     <div ref={ref} className="relative inline-flex">

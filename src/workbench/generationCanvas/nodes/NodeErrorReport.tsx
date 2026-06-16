@@ -50,9 +50,8 @@ export function NodeErrorReport({ message, onRetry }: { message: string; onRetry
         'bg-[color-mix(in_oklch,var(--workbench-danger)_5%,var(--nomi-paper))]',
         'border border-[color-mix(in_oklch,var(--workbench-danger)_24%,transparent)]',
       )}
-      // 错误文案要能划选复制去搜/反馈：stage 全局 user-select:none 下逐元素放开,
-      // 并拦下 pointer-down 防止划选手势被节点拖拽吃掉。
-      onPointerDown={(event) => event.stopPropagation()}
+      // 不拦 pointerdown：错误卡 inset-0 盖住整个节点正文，若 stopPropagation 会让节点**拖不动也选不中**
+      // （用户真机反馈）。放行 → 节点可拖可选、参数框正常弹；复制错误详情走卡里的「复制详情」按钮（不靠划选）。
     >
       <div className="flex items-start gap-2">
         <IconAlertTriangle size={16} stroke={1.7} className="mt-[1px] shrink-0 text-workbench-danger" />

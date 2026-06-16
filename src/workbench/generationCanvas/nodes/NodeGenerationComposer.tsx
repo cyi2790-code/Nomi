@@ -179,8 +179,10 @@ export default function NodeGenerationComposer({ node, visualSize }: Props): JSX
     setWidestFooterWidth((prev) => (prev === px ? prev : px))
   }, [])
   // 下限 360 保证提示词可写；+padding 还原成卡宽。未测出前 undefined → 走 min-w-[360] 兜底。
+  // 上限 560（用户真机反馈"太太太宽"）：恒定卡宽防生成钮跳动仍保留，但封住「某个宽候选模型把所有
+  // composer 撑到一行 1500+px」——超界的参数行改为换行（InlineParameterBar flex-wrap），不再横向爆宽。
   const cardWidth = widestFooterWidth != null
-    ? Math.max(360, widestFooterWidth + CARD_HORIZONTAL_PADDING)
+    ? Math.max(360, Math.min(560, widestFooterWidth + CARD_HORIZONTAL_PADDING))
     : undefined
 
   return (

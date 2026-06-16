@@ -743,7 +743,6 @@ function BaseGenerationNodeImpl({
                             playsInline
                             preload='metadata'
                             draggable={false}
-                            onPointerDown={(e) => e.stopPropagation()}
                             onLoadedMetadata={(event) => {
                                 updateMediaDimensions(
                                     event.currentTarget.videoWidth,

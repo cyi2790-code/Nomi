@@ -143,7 +143,8 @@ export function useNodeDragResize({
             )
         )
             return;
-        if ((target as HTMLElement).tagName === "VIDEO") return;
+        // 视频不再整块拦截（原 `tagName==='VIDEO' return` 让视频节点拖不动也选不中——用户真机反馈）。
+        // 放行 → 节点可拖可选、参数框正常弹；视频 play/pause 点击(无位移)仍工作(拖拽有位移阈值，dragging:false)。
         event.stopPropagation();
         if (readOnly) {
             selectNode(node.id, event.shiftKey);
