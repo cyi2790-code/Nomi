@@ -303,6 +303,7 @@ function buildDocumentToolsForV2(hooks: AgentChatV2Hooks) {
     insert_at_cursor: make("insert_at_cursor"),
     replace_selection: make("replace_selection"),
     append_to_end: make("append_to_end"),
+    author_skill: make("author_skill"),
   } as const;
 }
 

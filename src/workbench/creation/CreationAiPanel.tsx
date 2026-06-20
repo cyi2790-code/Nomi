@@ -16,6 +16,7 @@ import { routeCreationIntent } from './creationIntentRouting'
 import type { WorkbenchAiMessage } from '../ai/workbenchAiTypes'
 import { WorkbenchAiHeaderActions } from '../ai/WorkbenchAiHeaderActions'
 import ActiveSkillChip from '../ai/ActiveSkillChip'
+import { importWorkbenchSkill, getAvailableSkillProviders, skillCapabilityFor, type SkillProviderKind } from '../api/skillApi'
 import { MemoryFold } from '../generationCanvas/components/MemoryFold'
 import { useWorkbenchStore } from '../workbenchStore'
 import { runStoryboardPlanner } from '../generationCanvas/agent/runStoryboardPlanner'
@@ -290,6 +291,36 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
           }
           if (event.toolName === 'read_selection') {
             void event.confirm({ ok: true, result: { text: documentToolsRef.current?.readSelectionText() ?? '' } })
+            return
+          }
+          // author_skill：转写出一个 Nomi skill 并落地。低风险（存文本文件、可逆、不花钱）→
+          // 自动落地，不弹确认卡；审阅靠「试跑一次」（用户拍板的 effect-first）。把能力差集喂回 LLM，
+          // 让它在回复里诚实标缺口（缺哪个 provider）。
+          if (event.toolName === 'author_skill') {
+            const args = (event.args && typeof event.args === 'object') ? event.args as Record<string, unknown> : {}
+            const manifest = args.manifest
+            const dirName = typeof args.dirName === 'string' && args.dirName.trim() ? args.dirName : 'imported-skill'
+            const skillMarkdown = typeof args.skillMarkdown === 'string' ? args.skillMarkdown : ''
+            const pkg = {
+              version: 'nomi-skill-v1' as const,
+              exportedAt: Date.now(),
+              dirName,
+              files: { 'SKILL.md': skillMarkdown, 'skill.json': JSON.stringify(manifest ?? {}, null, 2) },
+            }
+            const res = importWorkbenchSkill(pkg)
+            if (!res.ok) {
+              void event.confirm({ ok: false, message: res.error ?? 'skill 保存失败' })
+              return
+            }
+            const needed = (manifest && typeof manifest === 'object' && Array.isArray((manifest as Record<string, unknown>).requiredProviders))
+              ? (manifest as { requiredProviders: SkillProviderKind[] }).requiredProviders
+              : []
+            void getAvailableSkillProviders()
+              .then((available) => {
+                const cap = skillCapabilityFor({ neededProviders: needed }, available)
+                void event.confirm({ ok: true, result: { saved: true, skillName: res.skillName, dirName: res.dirName, missingProviders: cap.missing, satisfied: cap.satisfied } })
+              })
+              .catch(() => void event.confirm({ ok: true, result: { saved: true, skillName: res.skillName, dirName: res.dirName } }))
             return
           }
           // Write tools wait for explicit user approval through a card.
