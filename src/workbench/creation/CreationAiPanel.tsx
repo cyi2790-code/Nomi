@@ -155,9 +155,13 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
     return <IconFilePlus size={13} />
   }, [])
 
-  const launchStoryboardPlanning = React.useCallback((displayPrompt = '🎬 拆镜头') => {
+  const launchStoryboardPlanning = React.useCallback((displayPrompt = '🎬 拆镜头', revisionRequest?: string) => {
+    // P0-9 Slice 3：已有未落画布的方案 + 用户给了修改要求 → 进「改方案」模式（基于现方案改，不从头拆）。
+    const store = useWorkbenchStore.getState()
+    const currentPlan = store.storyboardPlan
+    const isRevision = Boolean(currentPlan && !store.storyboardPlanCommitted && revisionRequest?.trim())
     const storyText = (selectedText || documentText).trim()
-    if (!storyText) {
+    if (!isRevision && !storyText) {
       setError('先在左侧写一段故事，再让 AI 拆镜头。')
       return
     }
@@ -166,7 +170,7 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
     setMessages((prev) => [
       ...prev,
       { id: userId, role: 'user', content: displayPrompt },
-      { id: assistantId, role: 'assistant', content: '正在拆镜头，整理分镜方案…', status: 'pending' as const },
+      { id: assistantId, role: 'assistant', content: isRevision ? '正在按你的要求修改方案…' : '正在拆镜头，整理分镜方案…', status: 'pending' as const },
     ])
     setDraft('')
     setError('')
@@ -176,7 +180,7 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
     void (async () => {
       try {
         const { text } = await runStoryboardPlanner({
-          storyText,
+          ...(isRevision ? { currentPlan, revisionRequest } : { storyText }),
           onContent: (streamed) => {
             if (!handle.isCurrent()) return
             setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: streamed || '正在拆镜头…', status: 'streaming' as const } : m)))
@@ -186,7 +190,7 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
         if (!handle.isCurrent()) return // 轮次已被切项目/新对话作废:别把旧项目内容写进新项目
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === assistantId ? { ...m, content: text || '分镜方案已生成，见下方卡片——可打开编辑、修改后确认落画布。', status: 'done' as const } : m,
+            m.id === assistantId ? { ...m, content: text || (isRevision ? '方案已按你的要求更新，见下方编辑器。' : '分镜方案已生成，见下方卡片——可打开编辑、修改后确认落画布。'), status: 'done' as const } : m,
           ),
         )
       } catch (error: unknown) {
@@ -235,6 +239,12 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
     }
     const readyAttachments = attachments.filter((item) => item.status === 'ready' && item.url)
     if (!userRequest && !selectedText && !documentText && !readyAttachments.length) return
+    // P0-9 Slice 3：方案审阅中（编辑器替换了文档编辑器，用户正盯着方案）→ 输入即视为对现方案的
+    // 修改要求（「全部加负面词 / 统一冷调 / 第 3 镜改特写」等），交规划师基于现方案改、保留其余。
+    if (useWorkbenchStore.getState().storyboardEditorOpen && userRequest) {
+      launchStoryboardPlanning(userRequest, userRequest)
+      return
+    }
     // 对话驱动（删固定 chip，用户拍板 2026-06-13）：自然语言意图 → 甩给画布 agent。
     // 但手动锁定了 active skill（如「AI 写技能」）时跳过意图路由——否则含「分镜/镜头」等词的输入
     // 会被劫持到拆镜头流程，盖过用户明确选的技能。锁定 = 用户已明确意图，直走那个 skill。
