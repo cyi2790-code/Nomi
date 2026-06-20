@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { tool, type CoreMessage, type CoreUserMessage } from "ai";
 import { z } from "zod";
@@ -29,58 +28,13 @@ import {
   type DocumentToolName,
 } from "./documentTools";
 import { readNestedRecord, trim, type JsonRecord } from "../jsonUtils";
-import { getSkillsRoots, readText } from "../runtimePaths";
+import { findSkillRecord } from "../skills/skillStore";
 import { decryptApiKeyRecord } from "../catalog/secrets";
 import { normalizeProviderKind, readCatalog } from "../catalog/catalogStore";
 import type { Model, Vendor } from "../catalog/types";
 import { readNomiLocalAsset } from "../assets/localAssetFile";
 import { extractTextFromLocalAsset } from "../files/extractText";
 import { buildAgentUserContent, modelSupportsImageInput, modelSupportsPdfInput, type AgentUserAttachment } from "./agentUserContent";
-
-type SkillRecord = {
-  name: string;
-  directoryName: string;
-  filePath: string;
-  body: string;
-};
-
-function parseSkillName(markdown: string, directoryName: string): string {
-  const match = markdown.match(/^---\s*\n([\s\S]*?)\n---/);
-  const frontmatter = match?.[1] || "";
-  const nameMatch = frontmatter.match(/^name:\s*["']?(.+?)["']?\s*$/m);
-  return String(nameMatch?.[1] || directoryName).trim();
-}
-
-function normalizeSkillLookupKey(value: unknown): string {
-  return String(value || "")
-    .trim()
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-    .replace(/[._\s/]+/g, "-")
-    .replace(/[^a-zA-Z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .toLowerCase();
-}
-
-function readSkillRecords(): SkillRecord[] {
-  const records: SkillRecord[] = [];
-  for (const root of getSkillsRoots()) {
-    if (!fs.existsSync(root)) continue;
-    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const filePath = path.join(root, entry.name, "SKILL.md");
-      if (!fs.existsSync(filePath)) continue;
-      const body = readText(filePath).trim();
-      if (!body) continue;
-      records.push({
-        name: parseSkillName(body, entry.name),
-        directoryName: entry.name,
-        filePath,
-        body,
-      });
-    }
-  }
-  return records;
-}
 
 function readRequestedSkill(payload: JsonRecord): { key: string; name: string } {
   const chatContext = payload.chatContext;
@@ -89,28 +43,6 @@ function readRequestedSkill(payload: JsonRecord): { key: string; name: string } 
     key: trim(readNestedRecord(skill, ["key"])),
     name: trim(readNestedRecord(skill, ["name"])),
   };
-}
-
-function findSkillRecord(skillKey: string, skillName: string): SkillRecord | null {
-  const records = readSkillRecords();
-  if (!records.length) return null;
-  const normalizedKey = normalizeSkillLookupKey(skillKey);
-  const normalizedName = normalizeSkillLookupKey(skillName);
-
-  const exact = records.find((skill) => skill.name === skillKey);
-  if (exact) return exact;
-
-  const prefix = records
-    .filter((skill) => skillKey.startsWith(`${skill.name}.`))
-    .sort((a, b) => b.name.length - a.name.length)[0];
-  if (prefix) return prefix;
-
-  return records.find((skill) => (
-    normalizeSkillLookupKey(skill.name) === normalizedKey
-    || normalizeSkillLookupKey(skill.directoryName) === normalizedKey
-    || (normalizedName && normalizeSkillLookupKey(skill.name) === normalizedName)
-    || (normalizedName && normalizeSkillLookupKey(skill.directoryName) === normalizedName)
-  )) || null;
 }
 
 /**
