@@ -1,6 +1,4 @@
 import React from "react";
-import "./workbench.css";
-import "./workbench-ai.css";
 import NomiAppBar from "../ui/app-shell/NomiAppBar";
 import {
     isWorkspaceMode,
@@ -9,14 +7,19 @@ import {
 } from "./workbenchStore";
 import { cn } from "../utils/cn";
 import ProjectExplorerSidebar from "./explorer/ProjectExplorerSidebar";
+import { markStartup, markStartupProbe, timeStartupStepAsync } from "../utils/startupDiagnostics";
 
 const CreationWorkspace = React.lazy(
-    () => import("./creation/CreationWorkspace"),
+    () => timeStartupStepAsync("load CreationWorkspace chunk", () => import("./creation/CreationWorkspace"), 250),
 );
 const GenerationWorkspace = React.lazy(
-    () => import("./generation/GenerationWorkspace"),
+    () => timeStartupStepAsync("load GenerationWorkspace chunk", () => import("./generation/GenerationWorkspace"), 250),
 );
-const PreviewWorkspace = React.lazy(() => import("./preview/PreviewWorkspace"));
+const PreviewWorkspace = React.lazy(() =>
+    timeStartupStepAsync("load PreviewWorkspace chunk", () => import("./preview/PreviewWorkspace"), 250),
+);
+
+const WORKBENCH_READY_FALLBACK_MS = 160;
 
 type WorkbenchShellProps = {
     generation: React.ReactNode;
@@ -119,6 +122,33 @@ export default function WorkbenchShell({
     const [mountedWorkspaceModes, setMountedWorkspaceModes] = React.useState<
         WorkspaceMode[]
     >(() => [workspaceMode]);
+
+    React.useEffect(() => {
+        markStartup("WorkbenchShell mounted");
+        markStartupProbe("workbench-shell-mounted", { workspaceMode });
+        let readyMarked = false;
+        let firstFrame = 0;
+        let secondFrame = 0;
+        const markReady = (source: "raf" | "timeout") => {
+            if (readyMarked) return;
+            readyMarked = true;
+            window.clearTimeout(fallbackTimer);
+            if (firstFrame) window.cancelAnimationFrame(firstFrame);
+            if (secondFrame) window.cancelAnimationFrame(secondFrame);
+            markStartupProbe("workbench-shell-ready", { workspaceMode, source });
+        };
+        const fallbackTimer = window.setTimeout(() => markReady("timeout"), WORKBENCH_READY_FALLBACK_MS);
+        firstFrame = window.requestAnimationFrame(() => {
+            secondFrame = window.requestAnimationFrame(() => markReady("raf"));
+        });
+        return () => {
+            window.clearTimeout(fallbackTimer);
+            if (firstFrame) window.cancelAnimationFrame(firstFrame);
+            if (secondFrame) window.cancelAnimationFrame(secondFrame);
+        };
+        // Startup marker only: avoid remount-mode updates canceling the queued ready signal.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     React.useEffect(() => {
         const initialMode = readWorkspaceModeFromUrl();

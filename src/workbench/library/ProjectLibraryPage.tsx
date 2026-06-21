@@ -1,10 +1,11 @@
 import React from 'react'
-import { IconFolderOpen, IconMovie, IconSparkles, IconTrash } from '@tabler/icons-react'
-import { cn } from '../../utils/cn'
-import { NomiLogoMark } from '../../design'
+import IconFolderOpen from '@tabler/icons-react/dist/esm/icons/IconFolderOpen.mjs'
+import IconMovie from '@tabler/icons-react/dist/esm/icons/IconMovie.mjs'
+import IconSparkles from '@tabler/icons-react/dist/esm/icons/IconSparkles.mjs'
+import IconTrash from '@tabler/icons-react/dist/esm/icons/IconTrash.mjs'
 import type { LocalProjectSummary } from './localProjectStore'
-import { TRY_NOW_EXAMPLES, type TryNowExample } from './tryNowExamples'
-import { PROJECT_TEMPLATE_LIST, type ProjectTemplateId } from './projectTemplates'
+import type { TryNowExample } from './tryNowExamples'
+import type { ProjectTemplate, ProjectTemplateId } from './projectTemplates'
 
 type Props = {
   onOpenProject: (projectId: string) => void
@@ -13,6 +14,28 @@ type Props = {
   onOpenFolder?: () => void
   onTryExample?: (example: TryNowExample) => void
   projects: LocalProjectSummary[]
+}
+
+function cn(...values: Array<string | false | null | undefined>): string {
+  return values.filter(Boolean).join(' ')
+}
+
+function NomiLogoMark({ size = 24 }: { size?: number }): JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 28 28"
+      fill="none"
+      aria-hidden="true"
+      className="block shrink-0"
+    >
+      <rect width="28" height="28" rx="7" fill="oklch(0.22 0.01 80)" />
+      <rect x="5.5" y="5.5" width="4" height="17" rx="1.2" fill="white" />
+      <rect x="18.5" y="5.5" width="4" height="17" rx="1.2" fill="white" />
+      <polygon points="9.5,5.5 13.5,5.5 18.5,22.5 14.5,22.5" fill="white" />
+    </svg>
+  )
 }
 
 function TemplatePickerModal({
@@ -24,6 +47,19 @@ function TemplatePickerModal({
   onCancel: () => void
   onPick: (id: ProjectTemplateId) => void
 }): JSX.Element | null {
+  const [templates, setTemplates] = React.useState<ProjectTemplate[]>([])
+
+  React.useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void import('./projectTemplates').then((module) => {
+      if (!cancelled) setTemplates(module.PROJECT_TEMPLATE_LIST)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
   if (!open) return null
   return (
     <div
@@ -49,7 +85,7 @@ function TemplatePickerModal({
           </button>
         </div>
         <div className="grid gap-3">
-          {PROJECT_TEMPLATE_LIST.map((tpl) => (
+          {templates.map((tpl) => (
             <button
               type="button"
               key={tpl.id}
@@ -107,6 +143,16 @@ function ThumbnailMosaic({ urls }: { urls: string[] }): JSX.Element {
 
 export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onNewProject, onOpenFolder, onTryExample, projects }: Props): JSX.Element {
   const [query, setQuery] = React.useState('')
+  const [tryNowExamples, setTryNowExamples] = React.useState<TryNowExample[]>([])
+
+  const loadTryNowExamples = React.useCallback(() => {
+    if (!onTryExample) return
+    if (tryNowExamples.length > 0) return
+    void import('./tryNowExamples').then((module) => {
+      setTryNowExamples(module.TRY_NOW_EXAMPLES)
+    })
+  }, [onTryExample, tryNowExamples.length])
+
   const normalizedQuery = query.trim().toLowerCase()
   const filteredProjects = normalizedQuery
     ? projects.filter((project) => project.name.toLowerCase().includes(normalizedQuery))
@@ -133,6 +179,8 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
             )}
             data-try-now-hero="true"
             aria-label="30 秒体验 Nomi 故事板"
+            onMouseEnter={loadTryNowExamples}
+            onFocus={loadTryNowExamples}
           >
             <div className="flex items-center gap-2 text-nomi-accent text-[11.5px] font-medium uppercase tracking-wider">
               <IconSparkles size={14} />
@@ -147,7 +195,7 @@ export default function ProjectLibraryPage({ onOpenProject, onDeleteProject, onN
               </p>
             </div>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2 mt-1">
-              {TRY_NOW_EXAMPLES.map((example) => (
+              {(tryNowExamples.length > 0 ? tryNowExamples : []).map((example) => (
                 <button
                   key={example.id}
                   type="button"

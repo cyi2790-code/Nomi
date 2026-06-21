@@ -7,6 +7,7 @@ import type { GenerationCanvasNode } from '../model/generationCanvasTypes'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'
 
 export const GENERATION_CANVAS_IMAGE_IMPORT_MAX_BYTES = 30 * 1024 * 1024
+const DATA_URL_FALLBACK_MAX_BYTES = 512 * 1024
 
 export type GenerationAssetImportItem = {
   node: GenerationCanvasNode
@@ -161,7 +162,6 @@ export async function importImageFilesToGenerationCanvas(
   await Promise.all(filtered.files.slice(0, 8).map(async (file, index) => {
     const localUrl = createObjectUrl(file)
     const dimensions = await readImageDimensions(localUrl)
-    const persistableUrl = await readFileDataUrl(file)
     const size = nodeSizeForDimensions(dimensions)
     const node = useGenerationCanvasStore.getState().addNode({
       kind: 'asset',
@@ -172,26 +172,17 @@ export async function importImageFilesToGenerationCanvas(
         y: Math.max(40, Math.round(options.basePosition.y + index * 28)),
       },
     })
-    const result = {
-      id: `local-${node.id}-${Date.now()}`,
-      type: 'image' as const,
-      url: persistableUrl,
-      createdAt: Date.now(),
-    }
     useGenerationCanvasStore.getState().updateNode(node.id, {
-      result,
-      history: [result],
       ...(size ? { size } : {}),
-      status: 'success',
+      status: 'queued',
       meta: {
         ...(node.meta || {}),
         source: 'local-drop',
         fileName: file.name,
-        localOnly: true,
         uploadStatus: 'uploading',
         ...imageMetaForDimensions(dimensions),
       },
-    })
+    }, { persist: false })
     created.push({ node, file, localUrl })
   }))
 
@@ -200,17 +191,31 @@ export async function importImageFilesToGenerationCanvas(
     try {
       hosted = await uploadFile(file, deriveLabelFromFileName(file.name), { ownerNodeId: node.id })
     } catch {
-      hosted = await recoverFile(file)
+      hosted = await recoverFile()
     }
     const hostedUrl = getHostedUrl(hosted)
     if (!hostedUrl) {
+      const canPersistSmallFallback = (typeof file.size === 'number' ? file.size : 0) <= DATA_URL_FALLBACK_MAX_BYTES
+      const fallbackResult = canPersistSmallFallback
+        ? {
+            id: `local-${node.id}-${Date.now()}`,
+            type: 'image' as const,
+            url: await readFileDataUrl(file),
+            createdAt: Date.now(),
+          }
+        : null
       useGenerationCanvasStore.getState().updateNode(node.id, {
+        ...(fallbackResult ? { result: fallbackResult, history: [fallbackResult] } : {}),
+        status: fallbackResult ? 'success' : 'error',
+        error: fallbackResult ? undefined : '本地素材复制失败，请重新导入',
         meta: {
           ...(useGenerationCanvasStore.getState().nodes.find((candidate) => candidate.id === node.id)?.meta || {}),
           uploadStatus: 'local-only',
           localOnly: true,
+          persistable: Boolean(fallbackResult),
         },
       })
+      revokeObjectUrl(localUrl)
       return
     }
     const hostedResult = {

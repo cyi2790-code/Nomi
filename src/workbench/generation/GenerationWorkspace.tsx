@@ -1,6 +1,17 @@
 import React from 'react'
 import { cn } from '../../utils/cn'
-import TimelinePanel from '../timeline/TimelinePanel'
+import { markStartupProbe } from '../../utils/startupDiagnostics'
+
+const TimelinePanel = React.lazy(() => import('../timeline/TimelinePanel'))
+
+function TimelinePlaceholder(): JSX.Element {
+  return (
+    <div
+      className="w-full h-full bg-[var(--workbench-surface-solid)] border-t border-[var(--workbench-border)]"
+      aria-label="生成时间轴加载中"
+    />
+  )
+}
 
 type GenerationWorkspaceProps = {
   canvas: React.ReactNode
@@ -13,6 +24,14 @@ export default function GenerationWorkspace({
   aiSidebar,
   aiLayout = 'sidebar',
 }: GenerationWorkspaceProps): JSX.Element {
+  const [timelineEnabled, setTimelineEnabled] = React.useState(false)
+
+  React.useEffect(() => {
+    markStartupProbe('generation-workspace-mounted')
+    const timer = window.setTimeout(() => setTimelineEnabled(true), 1_200)
+    return () => window.clearTimeout(timer)
+  }, [])
+
   return (
     <section
       className={cn(
@@ -50,7 +69,13 @@ export default function GenerationWorkspace({
         'workbench-generation__timeline',
         'col-span-full min-w-0 min-h-0',
       )}>
-        <TimelinePanel density="compact" regionLabel="生成时间轴" actionLabelPrefix="生成时间轴-" />
+        {timelineEnabled ? (
+          <React.Suspense fallback={<TimelinePlaceholder />}>
+            <TimelinePanel density="compact" regionLabel="生成时间轴" actionLabelPrefix="生成时间轴-" />
+          </React.Suspense>
+        ) : (
+          <TimelinePlaceholder />
+        )}
       </div>
     </section>
   )

@@ -1,6 +1,7 @@
 import React from 'react'
 import { IconDownload, IconPlayerPause, IconPlayerPlay, IconRefresh, IconZoomIn, IconZoomOut } from '@tabler/icons-react'
-import { NomiLoadingMark, WorkbenchButton, WorkbenchIconButton } from '../../design'
+import { NomiLoadingMark } from '../../design/identity'
+import { WorkbenchButton, WorkbenchIconButton } from '../../design/workbenchActions'
 import { cn } from '../../utils/cn'
 import { useWorkbenchStore } from '../workbenchStore'
 import type { TimelineClip, TimelineState } from '../timeline/timelineTypes'

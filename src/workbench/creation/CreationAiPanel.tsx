@@ -1,7 +1,8 @@
 import React from 'react'
 import { IconCursorText, IconFilePlus, IconMovie, IconReplace, IconSend2 } from '@tabler/icons-react'
-import { NomiAILabel, NomiLoadingMark, WorkbenchButton, WorkbenchIconButton } from '../../design'
-import { NomiMarkdown } from '../common/NomiMarkdown'
+import { NomiAILabel, NomiLoadingMark } from '../../design/identity'
+import { WorkbenchButton, WorkbenchIconButton } from '../../design/workbenchActions'
+import { LazyNomiMarkdown } from '../common/LazyNomiMarkdown'
 import { cn } from '../../utils/cn'
 import { runWorkbenchAgent, workbenchSessionKey, type ToolCallEvent } from '../ai/workbenchAgentRunner'
 import { clearWorkbenchAgentSession } from '../../api/server'
@@ -239,6 +240,8 @@ export default function CreationAiPanel(): JSX.Element {
         'grid grid-rows-[44px_minmax(0,1fr)_auto_auto]',
         '[grid-template-areas:"header"_"messages"_"error"_"composer"]',
         'min-w-0 min-h-0 overflow-hidden',
+        'border border-nomi-line rounded-nomi-lg shadow-nomi-sm',
+        'bg-[var(--workbench-ai-panel-bg)] text-workbench-ink',
       )}
       aria-label="AI 创作区"
     >
@@ -246,6 +249,7 @@ export default function CreationAiPanel(): JSX.Element {
         className={cn(
           'workbench-creation-ai__header',
           '[grid-area:header] flex items-center justify-between gap-[10px] min-w-0',
+          'h-11 min-h-11 px-3 border-b border-workbench-border-soft bg-nomi-paper',
         )}
       >
         <div className={cn('workbench-creation-ai__title', 'inline-flex items-center gap-2')}>
@@ -259,6 +263,10 @@ export default function CreationAiPanel(): JSX.Element {
           actionClassName={cn(
             'workbench-creation-ai__header-action',
             'inline-flex items-center justify-center shrink-0 cursor-pointer whitespace-nowrap',
+            'h-[26px] w-auto min-w-[26px] px-2 rounded-nomi-sm',
+            'border border-transparent bg-transparent text-nomi-ink-60 text-[12.5px]',
+            'hover:border-[var(--workbench-ai-border)] hover:bg-workbench-hover',
+            '[&>svg]:size-[var(--workbench-icon-size)] [&>svg]:[stroke-width:var(--workbench-icon-stroke)]',
             'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
           )}
           onModelIntegration={openWorkbenchModelIntegration}
@@ -271,18 +279,31 @@ export default function CreationAiPanel(): JSX.Element {
         className={cn(
           'workbench-creation-ai__messages',
           '[grid-area:messages] min-h-0 overflow-auto',
+          'bg-[var(--workbench-ai-panel-bg)] p-4',
         )}
         aria-live="polite"
       >
         {messages.length === 0 && pendingToolCalls.length === 0 ? (
-          <div className={cn('workbench-creation-ai__empty', 'h-full grid place-content-center justify-items-center')}>
-            <div className="workbench-creation-ai__empty-title">需要一点灵感？</div>
-            <div className="workbench-creation-ai__empty-sub">告诉 AI 你想写什么，它会给你一个开头。</div>
-            <div className="workbench-creation-ai__suggestions">
+          <div
+            className={cn(
+              'workbench-creation-ai__empty',
+              'mx-auto my-auto flex min-h-full max-w-[240px] flex-col items-center justify-center gap-2.5',
+              'px-3 py-6 text-center text-nomi-ink',
+            )}
+          >
+            <div className="workbench-creation-ai__empty-title font-nomi-display text-[17px] font-medium text-nomi-ink">需要一点灵感？</div>
+            <div className="workbench-creation-ai__empty-sub text-[13px] leading-[1.55] text-nomi-ink-60">告诉 AI 你想写什么，它会给你一个开头。</div>
+            <div className="workbench-creation-ai__suggestions mt-2 flex w-full flex-col gap-1.5">
               {suggestions.map((suggestion) => (
                 <WorkbenchButton
                   key={suggestion}
-                  className="workbench-creation-ai__suggestion"
+                  className={cn(
+                    'workbench-creation-ai__suggestion',
+                    'h-auto min-h-[34px] justify-start px-3 py-2',
+                    'border border-transparent rounded-nomi bg-nomi-ink-05',
+                    'text-left [font:inherit] text-[12.5px] text-nomi-ink-80',
+                    'hover:border-nomi-line hover:bg-nomi-paper hover:text-nomi-ink',
+                  )}
                   onClick={() => setDraft(suggestion)}
                 >
                   {suggestion}
@@ -297,14 +318,17 @@ export default function CreationAiPanel(): JSX.Element {
               className={cn(
                 'workbench-creation-ai__message',
                 `workbench-creation-ai__message--${message.role}`,
-                'p-[10px_11px] whitespace-pre-wrap',
+                'relative mb-2.5 max-w-[90%] p-[10px_11px] whitespace-pre-wrap',
+                'border-0 rounded-nomi bg-nomi-ink-05 shadow-none',
+                'text-nomi-ink text-[13.5px] leading-[1.55]',
+                message.role === 'user' && 'ml-auto rounded-br-[4px] bg-nomi-ink text-nomi-paper',
               )}
             >
-              <div className={cn('workbench-creation-ai__message-content', 'whitespace-normal')}>
+              <div className={cn('workbench-creation-ai__message-content', 'relative whitespace-normal [&>.nomi-loading-mark]:my-0.5')}>
                 {message.role === 'assistant' && message.content === '处理中...' ? (
                   <NomiLoadingMark size={15} label="处理中" />
                 ) : (
-                  <NomiMarkdown compact>{message.content}</NomiMarkdown>
+                  <LazyNomiMarkdown compact>{message.content}</LazyNomiMarkdown>
                 )}
                 {message.role === 'assistant' && message.content !== '处理中...' && !message.content.startsWith('（错误）') ? (
                   <AiReplyActionButton
@@ -371,13 +395,20 @@ export default function CreationAiPanel(): JSX.Element {
         </div>
       ) : null}
 
-      <footer className={cn('workbench-creation-ai__composer', '[grid-area:composer]')}>
+      <footer
+        className={cn(
+          'workbench-creation-ai__composer',
+          '[grid-area:composer] min-h-0 m-0 p-3',
+          'border-t border-nomi-line-soft bg-nomi-paper shadow-none',
+        )}
+      >
         <textarea
           className={cn(
             'workbench-creation-ai__input',
-            'w-full min-h-[78px] resize-none',
+            'w-full min-h-10 resize-none p-0',
             'border-0 rounded-none bg-transparent',
-            'font-inherit outline-none',
+            '[font:inherit] text-[13.5px] leading-[1.45] text-nomi-ink outline-none',
+            'placeholder:text-workbench-muted-soft',
             'focus:shadow-none',
           )}
           value={draft}
@@ -385,19 +416,23 @@ export default function CreationAiPanel(): JSX.Element {
           onChange={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => handleAiComposerKeyDown(event, () => void send())}
         />
-        <div className={cn('workbench-creation-ai__actions', 'flex items-center justify-between gap-2')}>
+        <div className={cn('workbench-creation-ai__actions', 'flex items-center justify-between gap-2 border-t-0 pt-1')}>
           <label
             className={cn(
               'workbench-creation-ai__mode-picker',
-              'min-w-0 h-[30px] inline-flex items-center gap-[6px] px-2 cursor-pointer',
+              'min-w-0 h-[25px] max-w-[min(210px,100%)] inline-flex items-center gap-[6px] p-0 cursor-pointer',
+              'border-0 bg-transparent text-nomi-ink-40',
+              'hover:bg-workbench-accent-soft hover:text-workbench-accent',
             )}
             title={activeMode.description}
           >
-            <span className={cn('workbench-creation-ai__mode-label', 'shrink-0 whitespace-nowrap')}>模式</span>
+            <span className={cn('workbench-creation-ai__mode-label', 'shrink-0 whitespace-nowrap text-[11.5px] font-medium text-inherit')}>模式</span>
             <select
               className={cn(
                 'workbench-creation-ai__mode-select',
-                'min-w-[70px] border-0 bg-transparent font-inherit outline-none cursor-pointer',
+                'h-[25px] min-w-[70px] px-1.5 py-[3px]',
+                'border border-nomi-line-soft rounded-nomi-sm bg-nomi-ink-05',
+                '[font:inherit] text-xs font-medium text-nomi-ink-80 outline-none cursor-pointer',
               )}
               aria-label="创作模式"
               value={activeMode.id}
@@ -430,8 +465,10 @@ export default function CreationAiPanel(): JSX.Element {
           <WorkbenchIconButton
             className={cn(
               'workbench-creation-ai__send',
-              'shrink-0 w-[30px] inline-flex items-center justify-center cursor-pointer',
-              'disabled:cursor-not-allowed disabled:opacity-[0.48]',
+              'shrink-0 size-[30px] inline-flex items-center justify-center cursor-pointer',
+              'border border-transparent rounded-full bg-nomi-ink text-nomi-paper',
+              'hover:bg-nomi-ink hover:text-nomi-paper',
+              'disabled:cursor-not-allowed disabled:bg-workbench-surface disabled:text-workbench-muted-soft disabled:opacity-75',
               'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
             )}
             label="发送"

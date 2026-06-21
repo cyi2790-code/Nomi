@@ -1,45 +1,51 @@
 import React from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import ProjectLibraryPage from "./library/ProjectLibraryPage";
 import { ToastHost } from "../ui/toast";
-import { FilePreviewPanel } from "./explorer/FilePreviewPanel";
-import {
-    createLocalProject,
-    deleteLocalProject,
-    useLocalProjects,
-    type LocalProjectSummary,
-} from "./library/localProjectStore";
-import {
-    buildStoryDocument,
-    type TryNowExample,
-} from "./library/tryNowExamples";
 import type { WorkbenchProjectPersistenceService } from "./project/projectPersistenceService";
+import type { WorkbenchProjectSummary as LocalProjectSummary } from "./project/projectRecordSchema";
 import { useWorkspaceEvents } from "./useWorkspaceEvents";
 import { cn } from "../utils/cn";
 import { toast } from "../ui/toast";
 import { setDesktopActiveProjectId } from "../desktop/activeProject";
-import { getDesktopBridge } from "../desktop/bridge";
-import { buildStudioUrl } from "../utils/appRoutes";
-import {
-    openWorkspaceFromLibrary,
-    openWorkspaceProjectFromPicker,
-} from "./library/openWorkspaceFlow";
+import { markStartup, markStartupProbe, timeStartupStepAsync } from "../utils/startupDiagnostics";
 
-type AppView = "library" | "studio";
+type AppView = "library" | "studio" | "loading";
 type ProjectPersistenceModule = typeof import("./project/projectPersistenceService");
 
-const WorkbenchShell = React.lazy(() => import("./WorkbenchShell"));
+const ProjectLibraryRoute = React.lazy(
+    () => import("./library/ProjectLibraryRoute"),
+);
+const WorkbenchShell = React.lazy(() =>
+    timeStartupStepAsync("load WorkbenchShell chunk", () => import("./WorkbenchShell"), 250),
+);
 const OnboardingFloatingPanel = React.lazy(() =>
     import("../ui/onboarding/OnboardingFloatingPanel").then((module) => ({
         default: module.OnboardingFloatingPanel,
     })),
 );
-const GenerationCanvas = React.lazy(
-    () => import("./generationCanvasV2/components/GenerationCanvas"),
+const MantineFeatureProvider = React.lazy(() =>
+    import("../ui/mantine/MantineFeatureProvider").then((module) => ({
+        default: module.MantineFeatureProvider,
+    })),
 );
-const CanvasAssistantPanel = React.lazy(
-    () => import("./generationCanvasV2/components/CanvasAssistantPanel"),
+const GenerationCanvas = React.lazy(() =>
+    timeStartupStepAsync("load GenerationCanvas chunk", () => import("./generationCanvasV2/components/GenerationCanvas"), 250),
 );
+const CanvasAssistantEntry = React.lazy(() =>
+    timeStartupStepAsync("load CanvasAssistantEntry chunk", () => import("./generationCanvasV2/components/CanvasAssistantEntry"), 250),
+);
+const FilePreviewPanel = React.lazy(() =>
+    import("./explorer/FilePreviewPanel").then((module) => ({
+        default: module.FilePreviewPanel,
+    })),
+);
+
+function buildStudioUrl(projectId?: string | null): string {
+    const normalizedProjectId = String(projectId || "").trim();
+    return normalizedProjectId
+        ? `/studio?projectId=${encodeURIComponent(normalizedProjectId)}`
+        : "/studio";
+}
 
 function GenerationCanvasLoading(): JSX.Element {
     return (
@@ -47,6 +53,16 @@ function GenerationCanvasLoading(): JSX.Element {
             className={cn("w-full h-full bg-workbench-bg")}
             aria-label='生成画布加载中'
         />
+    );
+}
+
+function StudioAppLoading(): JSX.Element {
+    return (
+        <div
+            className={cn("grid h-screen w-screen place-items-center bg-nomi-bg")}
+            aria-label='项目加载中'>
+            <div className='h-6 w-6 rounded-full border border-nomi-line border-t-nomi-accent animate-spin' />
+        </div>
     );
 }
 
@@ -60,10 +76,16 @@ function readProjectIdFromSearch(search: string): string | null {
 }
 
 export default function NomiStudioApp(): JSX.Element {
+    markStartupProbe("NomiStudioApp render");
     const navigate = useNavigate();
     const location = useLocation();
-    const [view, setView] = React.useState<AppView>("library");
-    const { projects, refreshProjects } = useLocalProjects();
+    const routeProjectId = React.useMemo(
+        () => readProjectIdFromSearch(location.search),
+        [location.search],
+    );
+    const [view, setView] = React.useState<AppView>(() =>
+        routeProjectId ? "loading" : "library",
+    );
     const [activeProject, setActiveProject] =
         React.useState<LocalProjectSummary | null>(null);
     const [generationAiCollapsed, setGenerationAiCollapsed] =
@@ -76,15 +98,13 @@ export default function NomiStudioApp(): JSX.Element {
         React.useRef<ProjectPersistenceModule | null>(null);
     const projectPersistenceServiceRef =
         React.useRef<WorkbenchProjectPersistenceService | null>(null);
-    const routeProjectId = React.useMemo(
-        () => readProjectIdFromSearch(location.search),
-        [location.search],
-    );
     const activeProjectPersistenceKey = activeProject
         ? `${activeProject.id}\u0000${activeProject.name}`
         : "";
 
     React.useEffect(() => {
+        markStartup("NomiStudioApp mounted");
+        markStartupProbe("NomiStudioApp mounted", { view });
         document.documentElement.dataset.theme = "light";
         document.documentElement.setAttribute(
             "data-mantine-color-scheme",
@@ -108,14 +128,15 @@ export default function NomiStudioApp(): JSX.Element {
     const ensureProjectPersistenceService = React.useCallback(async () => {
         let module = projectPersistenceModuleRef.current;
         if (!module) {
-            module = await import("./project/projectPersistenceService");
+            module = await timeStartupStepAsync(
+                "load project persistence module",
+                () => import("./project/projectPersistenceService"),
+            );
             projectPersistenceModuleRef.current = module;
         }
         let service = projectPersistenceServiceRef.current;
         if (!service) {
             service = module.createWorkbenchProjectPersistenceService({
-                setActiveProject,
-                setView,
                 onSaveError: (error) => {
                     console.error("project save error", error);
                     toast("项目保存失败，请检查本地磁盘权限", "error");
@@ -135,8 +156,13 @@ export default function NomiStudioApp(): JSX.Element {
             const { module, service } = await ensureProjectPersistenceService();
             hydratingProjectRef.current = true;
             try {
-                const hydrated = await service.hydrateProject(projectId);
+                const hydrated = await timeStartupStepAsync(
+                    `hydrate route project ${projectId}`,
+                    () => service.hydrateProject(projectId),
+                    500,
+                );
                 if (!hydrated) return false;
+                markStartupProbe("project-hydrated", { projectId: hydrated.id });
                 activeProjectIdRef.current = hydrated.id;
                 setActiveProject(hydrated);
                 setView("studio");
@@ -163,115 +189,6 @@ export default function NomiStudioApp(): JSX.Element {
         [ensureProjectPersistenceService, navigate],
     );
 
-    const openProject = React.useCallback(
-        (projectId: string) => {
-            void hydrateProject(projectId);
-        },
-        [hydrateProject],
-    );
-
-    const openWorkspaceFolder = React.useCallback(async () => {
-        await openWorkspaceFromLibrary({
-            bridge: getDesktopBridge(),
-            hydrateProject,
-            refreshProjects,
-            confirmInitialize: async (rootPath) =>
-                window.confirm(
-                    `将此文件夹初始化为 Nomi 项目？\n\n${rootPath}\n\nNomi 会创建 .nomi/，并把生成的图片、视频保存到 assets/ 和 exports/。`,
-                ),
-            showMessage: (message, tone) => toast(message, tone || "error"),
-        });
-    }, [hydrateProject, refreshProjects]);
-
-    const newProject = React.useCallback(async () => {
-        const desktop = getDesktopBridge();
-        if (desktop?.workspace) {
-            await openWorkspaceFolder();
-            return;
-        }
-        const project = createLocalProject();
-        void hydrateProject(project.id);
-    }, [hydrateProject, openWorkspaceFolder]);
-
-    /**
-     * Try-Now hero handler (C6). Creates a fresh project, hydrates it,
-     * stuffs the example story into the creation workbench document, then
-     * dispatches a storyboard request so the demo runs end-to-end with a
-     * single click. We delay the storyboard event until after the project
-     * has hydrated and the creation editor has mounted, otherwise the
-     * canvas-assistant listener might not be attached yet.
-     */
-    const tryExample = React.useCallback(
-        async (example: TryNowExample) => {
-            const desktop = getDesktopBridge();
-            let projectId: string | null = null;
-            if (desktop?.workspace) {
-                projectId = await openWorkspaceProjectFromPicker({
-                    bridge: desktop,
-                    name: example.projectName,
-                    confirmInitialize: async (rootPath) =>
-                        window.confirm(
-                            `将此文件夹初始化为 Nomi 示例项目？\n\n${rootPath}\n\nNomi 会创建 .nomi/，并把生成的图片、视频保存到 assets/ 和 exports/。`,
-                        ),
-                    showMessage: (message, tone) =>
-                        toast(message, tone || "error"),
-                });
-                if (!projectId) return;
-                refreshProjects();
-            } else {
-                const project = createLocalProject(example.projectName);
-                projectId = project.id;
-            }
-            const hydrated = await hydrateProject(projectId);
-            if (!hydrated) return;
-            const doc = buildStoryDocument(example.story, example.projectName);
-            const { useWorkbenchStore } = await import("./workbenchStore");
-            const store = useWorkbenchStore.getState();
-            store.setWorkbenchDocument(doc);
-            store.setWorkspaceMode("creation");
-            // Allow the creation editor + canvas assistant panel to mount before
-            // dispatching, so the storyboard listener actually picks up the event.
-            window.setTimeout(() => {
-                void import(
-                    "./generationCanvasV2/agent/storyboardLauncher"
-                ).then(({ requestStoryboardPlanning }) => {
-                    requestStoryboardPlanning({
-                        storyText: example.story,
-                        source: `library-try-now:${example.id}`,
-                    });
-                });
-            }, 200);
-        },
-        [hydrateProject, refreshProjects],
-    );
-
-    const deleteProject = React.useCallback(
-        (project: LocalProjectSummary) => {
-            const confirmed = window.confirm(
-                `确定删除「${project.name}」吗？项目文件夹和本地资源会一起删除。`,
-            );
-            if (!confirmed) return;
-            try {
-                deleteLocalProject(project.id);
-                if (activeProjectIdRef.current === project.id) {
-                    activeProjectIdRef.current = null;
-                    setActiveProject(null);
-                    setView("library");
-                    navigate(buildStudioUrl(), { replace: true });
-                }
-                toast("项目已删除", "success");
-            } catch (error: unknown) {
-                const message =
-                    error instanceof Error && error.message
-                        ? error.message
-                        : "项目删除失败";
-                console.error(message);
-                toast(message, "error");
-            }
-        },
-        [navigate],
-    );
-
     React.useEffect(() => {
         if (initialHydrationAttemptedRef.current) return;
         initialHydrationAttemptedRef.current = true;
@@ -279,15 +196,23 @@ export default function NomiStudioApp(): JSX.Element {
         let cancelled = false;
         hydratingProjectRef.current = true;
         void ensureProjectPersistenceService()
-            .then(({ service }) => service.hydrateInitialProject(projects))
+            .then(({ service }) =>
+                timeStartupStepAsync(
+                    "hydrate initial project",
+                    () => service.hydrateInitialProject(),
+                    500,
+                ),
+            )
             .then((hydrated) => {
                 if (cancelled) return;
                 if (hydrated) {
+                    markStartupProbe("initial-project-hydrated", { projectId: hydrated.id });
                     activeProjectIdRef.current = hydrated.id;
                     setActiveProject(hydrated);
                     setView("studio");
                     navigate(buildStudioUrl(hydrated.id), { replace: true });
                 } else {
+                    setView("library");
                     if (routeProjectId)
                         navigate(buildStudioUrl(), { replace: true });
                 }
@@ -298,6 +223,7 @@ export default function NomiStudioApp(): JSX.Element {
                         ? error.message
                         : "项目恢复失败";
                 console.error(message);
+                setView("library");
             })
             .finally(() => {
                 if (!cancelled) hydratingProjectRef.current = false;
@@ -309,7 +235,6 @@ export default function NomiStudioApp(): JSX.Element {
     }, [
         ensureProjectPersistenceService,
         navigate,
-        projects,
         routeProjectId,
     ]);
 
@@ -321,8 +246,12 @@ export default function NomiStudioApp(): JSX.Element {
             return;
         if (!routeProjectId || routeProjectId === activeProjectIdRef.current)
             return;
+        setView("loading");
         void hydrateProject(routeProjectId, { replaceUrl: true }).then((ok) => {
-            if (!ok) navigate(buildStudioUrl(), { replace: true });
+            if (!ok) {
+                setView("library");
+                navigate(buildStudioUrl(), { replace: true });
+            }
         });
     }, [hydrateProject, navigate, routeProjectId]);
 
@@ -371,6 +300,12 @@ export default function NomiStudioApp(): JSX.Element {
         navigate(buildStudioUrl(), { replace: false });
     }, [navigate]);
 
+    const handleActiveProjectDeleted = React.useCallback(() => {
+        activeProjectIdRef.current = null;
+        setActiveProject(null);
+        setView("library");
+    }, []);
+
     const handleRenameProject = React.useCallback(
         (newName: string) => {
             if (!activeProject) return;
@@ -403,17 +338,20 @@ export default function NomiStudioApp(): JSX.Element {
         [activeProject, ensureProjectPersistenceService],
     );
 
+    if (view === "loading") {
+        return <StudioAppLoading />;
+    }
+
     if (view === "library") {
         return (
             <>
-                <ProjectLibraryPage
-                    projects={projects}
-                    onOpenProject={openProject}
-                    onDeleteProject={deleteProject}
-                    onNewProject={() => void newProject()}
-                    onOpenFolder={() => void openWorkspaceFolder()}
-                    onTryExample={(example) => void tryExample(example)}
-                />
+                <React.Suspense fallback={<StudioAppLoading />}>
+                    <ProjectLibraryRoute
+                        activeProjectId={activeProjectIdRef.current}
+                        hydrateProject={hydrateProject}
+                        onActiveProjectDeleted={handleActiveProjectDeleted}
+                    />
+                </React.Suspense>
                 <ToastHost />
             </>
         );
@@ -434,7 +372,7 @@ export default function NomiStudioApp(): JSX.Element {
                 }
                 generationAi={
                     <React.Suspense fallback={null}>
-                        <CanvasAssistantPanel
+                        <CanvasAssistantEntry
                             defaultCollapsed
                             onCollapsedChange={setGenerationAiCollapsed}
                         />
@@ -447,14 +385,16 @@ export default function NomiStudioApp(): JSX.Element {
                 onRenameProject={handleRenameProject}
             />
 
-            <OnboardingFloatingPanel
-                opened={modelCatalogOpened}
-                onClose={() => setModelCatalogOpened(false)}
-                // position='right'
-                // size={560}
-                // zIndex={4000}
-                // withinPortal
-            />
+            {modelCatalogOpened ? (
+                <React.Suspense fallback={null}>
+                    <MantineFeatureProvider>
+                        <OnboardingFloatingPanel
+                            opened
+                            onClose={() => setModelCatalogOpened(false)}
+                        />
+                    </MantineFeatureProvider>
+                </React.Suspense>
+            ) : null}
 
             <FilePreviewPanel />
 

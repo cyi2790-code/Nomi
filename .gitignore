@@ -8,11 +8,14 @@ dist/
 dist-electron/
 dist-local/
 release/
+.tmp/
 .turbo/
 coverage/
 test-results/
 playwright-report/
 *.tsbuildinfo
+public/tailwind.generated.css
+src/styles/tailwind.generated.css
 
 # Environment and local secrets
 .env

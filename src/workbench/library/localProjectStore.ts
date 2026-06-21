@@ -1,12 +1,9 @@
 import React from 'react'
 import useSWR, { mutate } from 'swr'
 import {
-  createLocalProject as createProjectRecord,
-  deleteLocalProject as deleteProjectRecord,
-  listLocalProjects as listProjectRecords,
-  readLocalProject,
-  saveLocalProject as saveProjectRecord,
-} from '../project/projectRepository'
+  listLocalProjectSummariesAsync,
+  listLocalProjectSummaries,
+} from '../project/projectSummaryRepository'
 import type {
   WorkbenchProjectRecordV1 as LocalProjectRecord,
   WorkbenchProjectSummary as LocalProjectSummary,
@@ -14,6 +11,7 @@ import type {
 import type { GenerationCanvasSnapshot } from '../generationCanvasV2/model/generationCanvasTypes'
 import type { TimelineState } from '../timeline/timelineTypes'
 import type { WorkbenchDocument } from '../workbenchTypes'
+import { markStartupProbe } from '../../utils/startupDiagnostics'
 
 const LOCAL_PROJECTS_SWR_KEY = 'nomi:local-projects:v1'
 
@@ -40,7 +38,7 @@ function publishLocalProjectRecord(record: LocalProjectRecord): void {
   void mutate<LocalProjectSummary[]>(
     LOCAL_PROJECTS_SWR_KEY,
     (current) => {
-      const items = Array.isArray(current) ? current : listProjectRecords()
+      const items = Array.isArray(current) ? current : []
       const index = items.findIndex((project) => project.id === summary.id)
       if (index < 0) return sortProjectSummaries([summary, ...items])
       const next = [...items]
@@ -55,7 +53,7 @@ function unpublishLocalProject(projectId: string): void {
   void mutate<LocalProjectSummary[]>(
     LOCAL_PROJECTS_SWR_KEY,
     (current) => {
-      const items = Array.isArray(current) ? current : listProjectRecords()
+      const items = Array.isArray(current) ? current : []
       return items.filter((project) => project.id !== projectId)
     },
     { revalidate: false },
@@ -63,7 +61,11 @@ function unpublishLocalProject(projectId: string): void {
 }
 
 export function listLocalProjects(): LocalProjectSummary[] {
-  return listProjectRecords()
+  return listLocalProjectSummaries()
+}
+
+export function listLocalProjectsAsync(): Promise<LocalProjectSummary[]> {
+  return listLocalProjectSummariesAsync()
 }
 
 export function useLocalProjects(): {
@@ -72,7 +74,11 @@ export function useLocalProjects(): {
 } {
   const { data, mutate: mutateProjects } = useSWR<LocalProjectSummary[]>(
     LOCAL_PROJECTS_SWR_KEY,
-    () => listProjectRecords(),
+    async () => {
+      const projects = await listLocalProjectSummariesAsync()
+      markStartupProbe('library-projects-ready', { count: projects.length })
+      return projects
+    },
     {
       fallbackData: [],
       revalidateOnMount: true,
@@ -82,7 +88,7 @@ export function useLocalProjects(): {
     },
   )
   const refreshProjects = React.useCallback(() => {
-    void mutateProjects(listProjectRecords(), { revalidate: false })
+    void mutateProjects(listLocalProjectSummariesAsync(), { revalidate: false })
   }, [mutateProjects])
   return {
     projects: data ?? [],
@@ -91,12 +97,24 @@ export function useLocalProjects(): {
 }
 
 export function createLocalProject(name?: string, templateId?: string, options: { rootPath?: string } = {}): LocalProjectRecord {
+  throw new Error('createLocalProject is async-only; use createLocalProjectAsync')
+}
+
+export async function createLocalProjectAsync(
+  name?: string,
+  templateId?: string,
+  options: { rootPath?: string } = {},
+): Promise<LocalProjectRecord> {
+  const { createLocalProject: createProjectRecord } = await import('../project/projectRepository')
   const record = createProjectRecord(name, templateId, options)
   publishLocalProjectRecord(record)
   return record
 }
 
-export { readLocalProject }
+export async function readLocalProjectAsync(projectId: string): Promise<LocalProjectRecord | null> {
+  const { readLocalProjectAsync: readProjectRecordAsync } = await import('../project/projectRepository')
+  return readProjectRecordAsync(projectId)
+}
 
 export function saveLocalProject(
   projectId: string,
@@ -107,12 +125,27 @@ export function saveLocalProject(
   },
   name?: string,
 ): LocalProjectRecord {
-  const record = saveProjectRecord(projectId, state, name)
+  throw new Error('saveLocalProject is async-only; use saveLocalProjectAsync')
+}
+
+export async function saveLocalProjectAsync(
+  projectId: string,
+  state: {
+    workbenchDocument: WorkbenchDocument
+    timeline: TimelineState
+    generationCanvas: GenerationCanvasSnapshot
+  },
+  name?: string,
+  baseSummary?: LocalProjectSummary,
+): Promise<LocalProjectRecord> {
+  const { saveLocalProjectAsync: saveProjectRecordAsync } = await import('../project/projectRepository')
+  const record = await saveProjectRecordAsync(projectId, state, name, baseSummary)
   publishLocalProjectRecord(record)
   return record
 }
 
-export function deleteLocalProject(projectId: string): void {
+export async function deleteLocalProject(projectId: string): Promise<void> {
+  const { deleteLocalProject: deleteProjectRecord } = await import('../project/projectRepository')
   deleteProjectRecord(projectId)
   unpublishLocalProject(projectId)
 }

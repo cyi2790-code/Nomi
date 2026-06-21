@@ -12,10 +12,26 @@ export function readCurrentWorkbenchProjectPayload(): WorkbenchProjectPayload {
   }
 }
 
-export function restoreWorkbenchProjectPayload(payload: WorkbenchProjectPayload): void {
-  useWorkbenchStore.getState().setWorkbenchDocument(payload.workbenchDocument)
-  useWorkbenchStore.getState().setTimeline(payload.timeline)
+export function readCurrentWorkbenchPersistMarker(): string {
+  const workbench = useWorkbenchStore.getState()
+  const generation = useGenerationCanvasStore.getState()
+  return `${workbench.persistRevision}:${generation.persistRevision}`
+}
+
+export function restoreWorkbenchProjectState(payload: Pick<WorkbenchProjectPayload, 'workbenchDocument' | 'timeline'>): void {
+  useWorkbenchStore.getState().restoreProjectWorkbenchState({
+    workbenchDocument: payload.workbenchDocument,
+    timeline: payload.timeline,
+  })
+}
+
+export function restoreGenerationCanvasState(payload: Pick<WorkbenchProjectPayload, 'generationCanvas'>): void {
   useGenerationCanvasStore.getState().restoreSnapshot(payload.generationCanvas)
+}
+
+export function restoreWorkbenchProjectPayload(payload: WorkbenchProjectPayload): void {
+  restoreWorkbenchProjectState(payload)
+  restoreGenerationCanvasState(payload)
 }
 
 export type WorkbenchProjectSaveFn = (

@@ -1,7 +1,8 @@
 import React from 'react'
 import { IconDownload, IconPhoto, IconPlugConnected } from '@tabler/icons-react'
 import type { WorkspaceMode } from '../../workbench/workbenchStore'
-import { NomiBrand, NomiStepper, WorkbenchButton } from '../../design'
+import { NomiBrand, NomiStepper } from '../../design/identity'
+import { WorkbenchButton } from '../../design/workbenchActions'
 import { cn } from '../../utils/cn'
 
 type NomiAppBarProps = {

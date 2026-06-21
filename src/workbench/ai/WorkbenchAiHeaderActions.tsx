@@ -1,5 +1,5 @@
 import { IconPlugConnected, IconPlus } from '@tabler/icons-react'
-import { WorkbenchIconButton } from '../../design'
+import { WorkbenchIconButton } from '../../design/workbenchActions'
 import { cn } from '../../utils/cn'
 
 export type WorkbenchAiHeaderActionsProps = {

@@ -41,7 +41,7 @@ export const auraPulseVariants: Variants = {
 
 /**
  * AI Chat thinking breathe — opacity + translate + scale
- * Replaces CSS @keyframes tc-ai-chat-thinking-breathe (was on ::after)
+ * Replaces the old pseudo-element breathing keyframes.
  */
 export const thinkingBreatheVariants: Variants = {
   animate: {

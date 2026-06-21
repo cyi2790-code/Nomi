@@ -3,7 +3,7 @@ import { cn } from '../../../utils/cn'
 import type { GenerationCanvasNode } from '../model/generationCanvasTypes'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'
 import { canRunGenerationNode, rerunGenerationNodeAsNewNode, runGenerationNode } from '../runner/generationRunController'
-import { WorkbenchButton } from '../../../design'
+import { WorkbenchButton } from '../../../design/workbenchActions'
 import NodeParameterControls, { useNodeParameterControlCount } from './NodeParameterControls'
 import { persistActiveWorkbenchProjectNow } from '../../project/workbenchProjectSession'
 import {

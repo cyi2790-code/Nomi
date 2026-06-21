@@ -2,8 +2,9 @@ import React from 'react'
 import { cn } from '../../utils/cn'
 import { type ProjectCategory } from '../project/projectCategories'
 import { useWorkbenchStore } from '../workbenchStore'
-import CategoryTree from '../sidebar/CategoryTree'
-import WorkspaceFileExplorerPanel from './WorkspaceFileExplorerPanel'
+
+const CategoryTree = React.lazy(() => import('../sidebar/CategoryTree'))
+const WorkspaceFileExplorerPanel = React.lazy(() => import('./WorkspaceFileExplorerPanel'))
 
 type Props = {
   categories?: ProjectCategory[]
@@ -11,7 +12,7 @@ type Props = {
 }
 
 export default function ProjectExplorerSidebar({ categories, projectId = null }: Props): JSX.Element {
-  const [tab, setTab] = React.useState<'categories' | 'files'>('files')
+  const [tab, setTab] = React.useState<'categories' | 'files'>('categories')
   const collapsed = useWorkbenchStore((s) => s.sidebarCollapsed)
   const toggle = useWorkbenchStore((s) => s.toggleSidebarCollapsed)
 
@@ -42,9 +43,13 @@ export default function ProjectExplorerSidebar({ categories, projectId = null }:
           <button type="button" onClick={() => { setTab('files'); toggle() }} className="w-9 h-8 rounded text-[11px] text-nomi-ink-40 hover:text-nomi-ink hover:bg-nomi-bg" aria-label="展开文件面板">文</button>
         </div>
       ) : tab === 'files' ? (
-        <WorkspaceFileExplorerPanel projectId={projectId} />
+        <React.Suspense fallback={<div className="px-3 py-4 text-[12px] text-nomi-ink-40">正在读取项目文件...</div>}>
+          <WorkspaceFileExplorerPanel projectId={projectId} />
+        </React.Suspense>
       ) : (
-        <CategoryTree categories={categories} />
+        <React.Suspense fallback={<div className="px-3 py-4 text-[12px] text-nomi-ink-40">正在读取分类...</div>}>
+          <CategoryTree categories={categories} />
+        </React.Suspense>
       )}
     </aside>
   )

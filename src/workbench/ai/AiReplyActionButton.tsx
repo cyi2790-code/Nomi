@@ -1,6 +1,6 @@
 import React from 'react'
 import { IconCheck, IconClipboard } from '@tabler/icons-react'
-import { WorkbenchIconButton } from '../../design'
+import { WorkbenchIconButton } from '../../design/workbenchActions'
 import { cn } from '../../utils/cn'
 import { useWorkbenchStore } from '../workbenchStore'
 

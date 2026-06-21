@@ -8,7 +8,7 @@ import {
   IconPhoto,
   IconVideo,
 } from '@tabler/icons-react'
-import { WorkbenchIconButton } from '../../design'
+import { WorkbenchIconButton } from '../../design/workbenchActions'
 import { cn } from '../../utils/cn'
 import { createNodeFromSelection, type SelectionGenerationKind } from './createNodeFromSelection'
 import { useGenerationCanvasStore } from '../generationCanvasV2/store/generationCanvasStore'

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell, webContents as electronWebContents } from "electron";
-import type { WebContents } from "electron";
+import type { MessageBoxOptions, WebContents } from "electron";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -63,28 +63,113 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL || process.env.NOMI_DESKTOP_DEV);
+const isStartupProbe = process.env.NOMI_STARTUP_PROBE === "1";
+const shouldLogPendingRequests = process.env.NOMI_LOG_PENDING_REQUESTS === "1";
 const devRemoteDebuggingPort = process.env.NOMI_DESKTOP_REMOTE_DEBUGGING_PORT;
 const DEV_RENDERER_LOAD_ATTEMPTS = 20;
 const DEV_RENDERER_LOAD_RETRY_MS = 500;
 const exportJobEventSubscriptions = new Map<number, () => void>();
+const desktopStartedAt = performance.now();
+let startupProbeQuitTimer: NodeJS.Timeout | null = null;
+
+const explicitUserDataDir = process.env.NOMI_ELECTRON_USER_DATA_DIR;
+if (explicitUserDataDir) {
+  app.setPath("userData", path.resolve(explicitUserDataDir));
+}
+
+function desktopElapsed(): string {
+  return `${(performance.now() - desktopStartedAt).toFixed(1)}ms`;
+}
+
+function logDesktopStartup(label: string): void {
+  console.log(`[nomi:desktop:start] ${label} total=${desktopElapsed()}`);
+}
+
+function timeDesktopStep<T>(label: string, work: () => T, warnMs = 250): T {
+  const startedAt = performance.now();
+  try {
+    return work();
+  } finally {
+    const duration = performance.now() - startedAt;
+    if (duration >= warnMs) {
+      console.log(`[nomi:desktop:start] ${label} took ${duration.toFixed(1)}ms total=${desktopElapsed()}`);
+    }
+  }
+}
+
+function scheduleStartupProbeQuit(label: string, delayMs = 300): void {
+  if (!isStartupProbe) return;
+  if (startupProbeQuitTimer && label === "startup probe timeout") return;
+  if (startupProbeQuitTimer) clearTimeout(startupProbeQuitTimer);
+  startupProbeQuitTimer = setTimeout(() => {
+    logDesktopStartup(`${label} quit`);
+    app.quit();
+  }, delayMs);
+}
 
 if (isDev && devRemoteDebuggingPort) {
   app.commandLine.appendSwitch("remote-debugging-port", devRemoteDebuggingPort);
 }
 
 function registerDevDiagnostics(mainWindow: BrowserWindow, rendererUrl: string): void {
-  if (!isDev) return;
+  if (!isDev && !isStartupProbe) return;
 
   console.log(`[nomi:desktop] loading renderer: ${rendererUrl}`);
+  if (shouldLogPendingRequests) {
+    const requestStarts = new Map<number, { startedAt: number; url: string }>();
+    const pendingRequestLogger = setInterval(() => {
+      const now = performance.now();
+      for (const [id, started] of requestStarts) {
+        const duration = now - started.startedAt;
+        if (duration < 3000) continue;
+        console.warn(
+          `[nomi:desktop:start] request pending ${id} ${duration.toFixed(1)}ms ${started.url}`,
+        );
+      }
+    }, 3000);
+    mainWindow.webContents.once("destroyed", () => clearInterval(pendingRequestLogger));
+    mainWindow.webContents.session.webRequest.onBeforeRequest((details, callback) => {
+      if (details.resourceType === "xhr") {
+        callback({});
+        return;
+      }
+      requestStarts.set(details.id, { startedAt: performance.now(), url: details.url });
+      callback({});
+    });
+    mainWindow.webContents.session.webRequest.onCompleted((details) => {
+      const started = requestStarts.get(details.id);
+      requestStarts.delete(details.id);
+      if (!started) return;
+      const duration = performance.now() - started.startedAt;
+      if (duration >= 500 || details.resourceType === "mainFrame") {
+        console.log(
+          `[nomi:desktop:start] request ${details.resourceType} ${details.statusCode} ${duration.toFixed(1)}ms ${started.url}`,
+        );
+      }
+    });
+    mainWindow.webContents.session.webRequest.onErrorOccurred((details) => {
+      const started = requestStarts.get(details.id);
+      requestStarts.delete(details.id);
+      const duration = started ? `${(performance.now() - started.startedAt).toFixed(1)}ms` : "unknown";
+      console.warn(
+        `[nomi:desktop:start] request failed ${details.resourceType} ${duration} ${details.error} ${started?.url || details.url}`,
+      );
+    });
+  }
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     console.error(`[nomi:desktop] renderer load failed (${errorCode}): ${errorDescription} ${validatedURL}`);
   });
   mainWindow.webContents.on("did-finish-load", () => {
     console.log("[nomi:desktop] renderer did finish load");
+    logDesktopStartup("renderer did finish load");
   });
   mainWindow.webContents.on("dom-ready", () => {
     console.log("[nomi:desktop] renderer dom ready");
+    logDesktopStartup("renderer dom ready");
+    if (isStartupProbe) {
+      scheduleStartupProbeQuit("startup probe timeout", 15_000);
+    }
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[nomi:desktop] renderer process gone:", details);
@@ -135,6 +220,7 @@ async function createWindow(): Promise<void> {
     height: 960,
     minWidth: 1100,
     minHeight: 720,
+    show: false,
     backgroundColor: "#f6f3ee",
     title: "Nomi",
     icon: path.join(__dirname, "../build/icon.png"),
@@ -145,6 +231,17 @@ async function createWindow(): Promise<void> {
       sandbox: false,
     },
   });
+  let hasShownWindow = false;
+  const showMainWindow = (reason: string): void => {
+    if (hasShownWindow || mainWindow.isDestroyed()) return;
+    hasShownWindow = true;
+    mainWindow.show();
+    if (isDev || isStartupProbe) {
+      logDesktopStartup(`window shown (${reason})`);
+    }
+  };
+
+  mainWindow.once("ready-to-show", () => showMainWindow("ready-to-show"));
 
   // External http(s) links (e.g. the "get your API key" link → provider console)
   // open in the user's real browser, never as a new in-app Electron window.
@@ -157,9 +254,15 @@ async function createWindow(): Promise<void> {
 
   const rendererUrl = getRendererUrl();
   registerDevDiagnostics(mainWindow, rendererUrl);
-  await loadRendererWithRetry(mainWindow, rendererUrl);
-
+  logDesktopStartup("load renderer start");
   if (isDev) {
+    showMainWindow("dev shell loading");
+  }
+  await loadRendererWithRetry(mainWindow, rendererUrl);
+  logDesktopStartup("load renderer resolved");
+  showMainWindow("load renderer resolved");
+
+  if (isDev && process.env.NOMI_OPEN_DEVTOOLS === "1") {
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 }
@@ -182,6 +285,16 @@ function registerSyncIpc<TArgs extends unknown[], TResult>(
 
 function registerIpc(): void {
   const selectedWorkspaceRoots = new Set<string>();
+  ipcMain.on("nomi:startup-probe:mark", (_event, message) => {
+    if (!isStartupProbe) return;
+    const label = String((message as { label?: unknown } | null)?.label || "").trim() || "renderer mark";
+    const payload = (message as { payload?: unknown } | null)?.payload;
+    const details = payload && typeof payload === "object" ? ` ${JSON.stringify(payload)}` : "";
+    console.log(`[nomi:desktop:start] renderer ${label} total=${desktopElapsed()}${details}`);
+    if (label === "library-projects-ready" || label === "generation-canvas-ready") {
+      scheduleStartupProbeQuit("startup probe ready");
+    }
+  });
   registerSyncIpc("nomi:projects:list", listProjects);
   registerSyncIpc("nomi:projects:create", (record: unknown) => {
     if (record && typeof record === "object" && typeof (record as { rootPath?: unknown }).rootPath === "string") {
@@ -207,24 +320,37 @@ function registerIpc(): void {
   registerSyncIpc("nomi:model-catalog:export", exportModelCatalogPackage);
   registerSyncIpc("nomi:model-catalog:import", importModelCatalogPackage);
 
+  ipcMain.handle("nomi:projects:list-async", () => timeDesktopStep("projects.listAsync", listProjects));
+  ipcMain.handle("nomi:projects:read-async", (_event, projectId) =>
+    timeDesktopStep("projects.readAsync", () => readProject(projectId), 500),
+  );
+  ipcMain.handle("nomi:projects:save-async", (_event, projectId, record) => saveProject(projectId, record));
   ipcMain.handle("nomi:model-catalog:docs:fetch", (_event, payload) => fetchModelCatalogDocs(payload));
-  ipcMain.handle("nomi:workspace:select-folder", async () => {
-    const selection = await selectWorkspaceFolder({ showOpenDialog: (options) => dialog.showOpenDialog(options) });
+  ipcMain.handle("nomi:workspace:select-folder", async (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender) || undefined;
+    const selection = await selectWorkspaceFolder({
+      showOpenDialog: (options) =>
+        owner ? dialog.showOpenDialog(owner, options) : dialog.showOpenDialog(options),
+    });
     if (!selection.canceled) selectedWorkspaceRoots.add(selection.rootPath);
     return selection;
   });
-  ipcMain.handle("nomi:workspace:open-folder", (_event, payload) => openWorkspaceFolder(payload, {
+  ipcMain.handle("nomi:workspace:open-folder", (event, payload) => openWorkspaceFolder(payload, {
     createProject,
     selectedRootPaths: selectedWorkspaceRoots,
     confirmInitialize: async (rootPath) => {
-      const result = await dialog.showMessageBox({
+      const owner = BrowserWindow.fromWebContents(event.sender) || undefined;
+      const options: MessageBoxOptions = {
         type: "question",
         buttons: ["取消", "初始化"],
         defaultId: 1,
         cancelId: 0,
         message: "初始化 Nomi 项目文件夹？",
         detail: `Nomi 会在此文件夹创建 .nomi/，并把生成的图片、视频保存到 assets/ 和 exports/.\n\n${rootPath}`,
-      });
+      };
+      const result = owner
+        ? await dialog.showMessageBox(owner, options)
+        : await dialog.showMessageBox(options);
       return result.response === 1;
     },
   }));

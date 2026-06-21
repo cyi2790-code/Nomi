@@ -1,16 +1,48 @@
 import React from 'react'
-import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { buildStudioUrl } from './utils/appRoutes'
-import { getAppRoutePath } from './utils/routes'
+import { markStartupProbe, timeStartupStepAsync } from './utils/startupDiagnostics'
 
-const NomiStudioApp = React.lazy(() => import('./workbench/NomiStudioApp'))
+const NomiStudioRoute = React.lazy(() => {
+  markStartupProbe('NomiStudioRoute lazy requested')
+  return timeStartupStepAsync('load NomiStudioRoute chunk', () => import('./NomiStudioRoute'), 250)
+})
 
-function RedirectToStudio(): JSX.Element {
-  const location = useLocation()
-  return <Navigate to={`${buildStudioUrl()}${location.search || ''}`} replace />
+const ProjectLibraryStandaloneRoute = React.lazy(() =>
+  timeStartupStepAsync(
+    'load ProjectLibraryStandaloneRoute chunk',
+    () => import('./workbench/library/ProjectLibraryStandaloneRoute'),
+    250,
+  ),
+)
+
+type AppRoute = {
+  hasProjectId: boolean
+}
+
+function readRoute(): AppRoute {
+  if (typeof window === 'undefined') return { hasProjectId: false }
+  try {
+    const hash = window.location.hash || '#/studio'
+    const search = hash.includes('?') ? hash.slice(hash.indexOf('?')) : ''
+    const projectId = search ? new URLSearchParams(search).get('projectId') : ''
+    return { hasProjectId: Boolean(projectId?.trim()) }
+  } catch {
+    return { hasProjectId: false }
+  }
+}
+
+function normalizeHashRoute(): void {
+  if (typeof window === 'undefined') return
+  const hash = window.location.hash || ''
+  if (!hash || hash === '#/' || hash.startsWith('#/workspace')) {
+    window.history.replaceState(null, '', '#/studio')
+  }
 }
 
 function RouteLoading(): JSX.Element {
+  React.useEffect(() => {
+    markStartupProbe('route-loading-mounted')
+  }, [])
+
   return (
     <div
       className="grid h-screen w-screen place-items-center bg-nomi-bg text-nomi-ink font-nomi-sans"
@@ -22,21 +54,28 @@ function RouteLoading(): JSX.Element {
 }
 
 export default function NomiRouterApp(): JSX.Element {
-  return (
-    <HashRouter>
-      <Routes>
-        <Route
-          path={getAppRoutePath('NomiStudioApp')}
-          element={(
-            <React.Suspense fallback={<RouteLoading />}>
-              <NomiStudioApp />
-            </React.Suspense>
-          )}
-        />
-        <Route path={getAppRoutePath('RedirectToStudio', '/')} element={<RedirectToStudio />} />
-        <Route path={getAppRoutePath('RedirectToStudio', '/workspace/*')} element={<RedirectToStudio />} />
-        <Route path={getAppRoutePath('RedirectToStudio', '*')} element={<RedirectToStudio />} />
-      </Routes>
-    </HashRouter>
+  markStartupProbe('NomiRouterApp render')
+  const [route, setRoute] = React.useState<AppRoute>(() => {
+    normalizeHashRoute()
+    return readRoute()
+  })
+
+  React.useEffect(() => {
+    const handleHashChange = () => {
+      normalizeHashRoute()
+      setRoute(readRoute())
+    }
+    window.addEventListener('hashchange', handleHashChange)
+    return () => window.removeEventListener('hashchange', handleHashChange)
+  }, [])
+
+  return route.hasProjectId ? (
+    <React.Suspense fallback={<RouteLoading />}>
+      <NomiStudioRoute />
+    </React.Suspense>
+  ) : (
+    <React.Suspense fallback={<RouteLoading />}>
+      <ProjectLibraryStandaloneRoute />
+    </React.Suspense>
   )
 }

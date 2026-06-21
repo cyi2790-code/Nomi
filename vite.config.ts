@@ -1,46 +1,111 @@
-import { defineConfig, loadEnv } from 'vite';
-import react from '@vitejs/plugin-react';
-import { resolve } from 'path';
+import fs from 'node:fs';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { resolve } from 'node:path';
+
+const NOMI_TAILWIND_CSS_PATH = '/tailwind.generated.css';
+const NOMI_TAILWIND_CSS_FILE = resolve(__dirname, 'public', 'tailwind.generated.css');
+
+function nomiStaticAssetPlugin(): Plugin {
+  return {
+    name: 'nomi-static-assets',
+    configureServer(server) {
+      server.middlewares.use((req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        const url = req.url?.split('?')[0] ?? '';
+        if (url === NOMI_TAILWIND_CSS_PATH) {
+          fs.readFile(NOMI_TAILWIND_CSS_FILE, (error, css) => {
+            if (error) {
+              next();
+              return;
+            }
+            res.statusCode = 200;
+            res.setHeader('content-type', 'text/css; charset=utf-8');
+            res.setHeader('cache-control', 'no-cache');
+            res.end(css);
+          });
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
 
 function createManualChunks(id: string): string | undefined {
+  const normalizedId = id.replace(/\\/g, '/');
+
   if (
-    id.includes('/node_modules/prosemirror-') ||
-    id.includes('/node_modules/orderedmap/') ||
-    id.includes('/node_modules/w3c-keyname/')
+    normalizedId.includes('vite/preload-helper') ||
+    normalizedId.includes('commonjsHelpers') ||
+    normalizedId.includes('/node_modules/@babel/runtime/helpers/') ||
+    normalizedId.includes('/node_modules/@babel/helpers/') ||
+    normalizedId.includes('/node_modules/tslib/')
+  ) {
+    return 'runtime-vendor';
+  }
+  if (
+    normalizedId.includes('/node_modules/react/') ||
+    normalizedId.includes('/node_modules/react-dom/') ||
+    normalizedId.includes('/node_modules/scheduler/') ||
+    normalizedId.includes('/node_modules/use-sync-external-store/')
+  ) {
+    return 'react-vendor';
+  }
+  if (
+    normalizedId.includes('/node_modules/zustand/') ||
+    normalizedId.includes('/node_modules/immer/')
+  ) {
+    return 'state-vendor';
+  }
+  if (
+    normalizedId.includes('/node_modules/clsx/') ||
+    normalizedId.includes('/node_modules/tailwind-merge/')
+  ) {
+    return 'ui-vendor';
+  }
+  if (normalizedId.includes('/node_modules/react-pannellum/')) {
+    return 'panorama-vendor';
+  }
+  if (
+    normalizedId.includes('/node_modules/prosemirror-') ||
+    normalizedId.includes('/node_modules/orderedmap/') ||
+    normalizedId.includes('/node_modules/w3c-keyname/')
   ) {
     return 'prosemirror-vendor';
   }
   if (
-    id.includes('/node_modules/@tiptap/') ||
-    id.includes('/node_modules/@prosemirror')
+    normalizedId.includes('/node_modules/@tiptap/') ||
+    normalizedId.includes('/node_modules/@prosemirror')
   ) {
     return 'tiptap-vendor';
   }
   if (
-    id.includes('/node_modules/react-markdown/') ||
-    id.includes('/node_modules/remark-') ||
-    id.includes('/node_modules/rehype-') ||
-    id.includes('/node_modules/unified/') ||
-    id.includes('/node_modules/mdast-') ||
-    id.includes('/node_modules/hast-')
+    normalizedId.includes('/node_modules/react-markdown/') ||
+    normalizedId.includes('/node_modules/remark-') ||
+    normalizedId.includes('/node_modules/rehype-') ||
+    normalizedId.includes('/node_modules/unified/') ||
+    normalizedId.includes('/node_modules/mdast-') ||
+    normalizedId.includes('/node_modules/hast-')
   ) {
     return 'markdown-vendor';
   }
-  if (id.includes('/node_modules/three/')) return 'three-vendor';
+  if (normalizedId.includes('/node_modules/three/')) return 'three-vendor';
   if (
-    id.includes('/node_modules/@react-three/') ||
-    id.includes('/node_modules/three-stdlib/') ||
-    id.includes('/node_modules/tunnel-rat/') ||
-    id.includes('/node_modules/suspend-react/')
+    normalizedId.includes('/node_modules/@react-three/') ||
+    normalizedId.includes('/node_modules/three-stdlib/') ||
+    normalizedId.includes('/node_modules/tunnel-rat/') ||
+    normalizedId.includes('/node_modules/suspend-react/')
   ) {
     return 'r3f-vendor';
   }
-  if (id.includes('/src/ui/stats/')) return 'app-stats';
-  if (id.includes('/src/api/')) return 'app-api';
+  if (normalizedId.includes('/src/ui/stats/')) return 'app-stats';
+  if (normalizedId.includes('/src/api/')) return 'app-api';
   return undefined;
 }
 
-export default defineConfig(({ command, mode }) => {
+export default defineConfig(async ({ command, mode }) => {
+  const react = (await import('@vitejs/plugin-react-swc')).default;
+
   loadEnv(mode, process.cwd(), 'VITE_');
 
   if (command === 'build' && mode !== 'production') {
@@ -51,13 +116,45 @@ export default defineConfig(({ command, mode }) => {
 
   return {
     base: './',
-    plugins: [react()],
+    cacheDir: resolve(__dirname, '.tmp/vite'),
+    plugins: [nomiStaticAssetPlugin(), react()],
+    resolve: {
+      alias: [
+        {
+          find: /^@tabler\/icons-react$/,
+          replacement: resolve(__dirname, 'src/vendor/tablerIcons.ts'),
+        },
+      ],
+    },
     server: {
       port: 5173,
       host: true,
+      cors: true,
+      hmr: process.env.NOMI_DISABLE_VITE_HMR === '1' ? false : undefined,
       fs: {
         allow: [resolve(__dirname)],
       },
+    },
+    optimizeDeps: {
+      entries: ['src/dev/optimizeDepsEntry.ts'],
+      noDiscovery: true,
+      holdUntilCrawlEnd: false,
+      esbuildOptions: {
+        minify: true,
+        sourcemap: false,
+      },
+      include: [
+        'react',
+        'react/jsx-dev-runtime',
+        'react-dom/client',
+        'react-router-dom',
+        'clsx',
+        'tailwind-merge',
+        'swr',
+        'zod',
+        'zustand',
+        'zustand/middleware',
+      ],
     },
     build: {
       outDir: resolve(__dirname, 'dist'),

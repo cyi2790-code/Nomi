@@ -1,6 +1,6 @@
 import React from 'react'
 import { cn } from '../../../utils/cn'
-import { WorkbenchButton } from '../../../design'
+import { WorkbenchButton } from '../../../design/workbenchActions'
 import { summarizeAgentPlan, type AgentPlanSummary } from './agentPlanSummary'
 
 export { summarizeAgentPlan }

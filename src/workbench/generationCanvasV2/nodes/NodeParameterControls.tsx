@@ -15,7 +15,7 @@ import {
 } from '../../../config/modelCatalogMeta'
 import { normalizeOrientation, type Orientation } from '../../../utils/orientation'
 import type { ModelOption } from '../../../config/models'
-import { WorkbenchButton } from '../../../design'
+import { WorkbenchButton } from '../../../design/workbenchActions'
 import type { GenerationCanvasEdge, GenerationCanvasEdgeMode, GenerationCanvasNode } from '../model/generationCanvasTypes'
 import { getGenerationNodeExecutionKind, isImageLikeGenerationNodeKind, isVideoLikeGenerationNodeKind } from '../model/generationNodeKinds'
 import { useGenerationCanvasStore } from '../store/generationCanvasStore'

@@ -1,0 +1,10 @@
+import 'react';
+import 'react/jsx-dev-runtime';
+import 'react-dom/client';
+import 'react-router-dom';
+import 'clsx';
+import 'tailwind-merge';
+import 'swr';
+import 'zod';
+import 'zustand';
+import 'zustand/middleware';

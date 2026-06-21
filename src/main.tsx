@@ -1,11 +1,7 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import NomiRouterApp from './NomiRouterApp'
-import { MantineProvider, MantineThemeProvider } from '@mantine/core'
-import { ModalsProvider } from '@mantine/modals'
-import { Notifications } from '@mantine/notifications'
-import './styles/index.css'
-import { buildNomiTheme } from './theme/nomiTheme'
+import { markStartup, markStartupProbe, timeStartupStep } from './utils/startupDiagnostics'
 
 const DEFAULT_COLOR_SCHEME = 'light'
 
@@ -14,27 +10,19 @@ function primeColorSchemeAttribute() {
   document.documentElement.setAttribute('data-mantine-color-scheme', DEFAULT_COLOR_SCHEME)
 }
 
+markStartup('renderer module loaded')
+markStartupProbe('renderer-module-loaded')
+;(window as typeof window & { __NOMI_RENDERER_MODULE_LOADED__?: boolean }).__NOMI_RENDERER_MODULE_LOADED__ = true
 primeColorSchemeAttribute()
-
-function DynamicThemeProvider({ children }: { children: React.ReactNode }) {
-  const theme = React.useMemo(() => buildNomiTheme(), [])
-
-  return <MantineThemeProvider theme={theme}>{children}</MantineThemeProvider>
-}
 
 const container = document.getElementById('root')
 if (!container) throw new Error('Root container not found')
-const root = container ? createRoot(container) : null
+const root = timeStartupStep('createRoot', () => (container ? createRoot(container) : null), 100)
 
 root?.render(
   <React.StrictMode>
-    <MantineProvider forceColorScheme={DEFAULT_COLOR_SCHEME} defaultColorScheme={DEFAULT_COLOR_SCHEME}>
-      <DynamicThemeProvider>
-        <ModalsProvider>
-          <Notifications position="top-right" zIndex={2000} />
-          <NomiRouterApp />
-        </ModalsProvider>
-      </DynamicThemeProvider>
-    </MantineProvider>
+    <NomiRouterApp />
   </React.StrictMode>
 )
+markStartup('react render scheduled')
+markStartupProbe('react-render-scheduled')

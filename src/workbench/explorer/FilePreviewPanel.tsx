@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { IconX, IconExternalLink } from '@tabler/icons-react'
 import type { WorkspaceFileNode } from '../../../electron/workspace/workspaceFileIndex'
 import { getDesktopBridge } from '../../desktop/bridge'
-import { NomiMarkdown } from '../common/NomiMarkdown'
+import { LazyNomiMarkdown } from '../common/LazyNomiMarkdown'
 import { useFilePreviewStore } from './useFilePreviewStore'
 import { buildWorkspaceFileUrl } from './workspaceFileDrag'
 
@@ -101,6 +101,6 @@ function TextPreview({ url, markdown }: { url: string; markdown: boolean }): JSX
 
   if (state.loading) return <div className="text-[13px] text-nomi-ink-40">加载中…</div>
   if (state.error) return <div className="text-[13px] text-workbench-danger">读取失败：{state.error}</div>
-  if (markdown) return <NomiMarkdown>{state.text}</NomiMarkdown>
+  if (markdown) return <LazyNomiMarkdown>{state.text}</LazyNomiMarkdown>
   return <pre className="whitespace-pre-wrap break-words font-nomi-mono text-[12.5px] leading-relaxed text-nomi-ink-80">{state.text}</pre>
 }

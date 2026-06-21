@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createLocalProject, readLocalProject } from './projectRepository'
+import { createLocalProject, listLocalProjectsAsync, readLocalProject, saveLocalProjectAsync } from './projectRepository'
+import { createDefaultWorkbenchProjectPayload } from './projectRecordSchema'
 import { getDesktopBridge } from '../../desktop/bridge'
 
 vi.mock('../../desktop/bridge', () => ({
@@ -131,5 +132,78 @@ describe('projectRepository workspace project creation', () => {
     expect(record?.payload.workbenchDocument.version).toBe(1)
     expect(record?.payload.timeline.tracks.length).toBeGreaterThan(0)
     expect(Array.isArray(record?.payload.generationCanvas.nodes)).toBe(true)
+  })
+
+  it('desktop listLocalProjectsAsync uses async project listing when available', async () => {
+    const list = vi.fn(() => {
+      throw new Error('sync project list should not be called')
+    })
+    const listAsync = vi.fn(async () => [
+      {
+        id: 'ws-list',
+        name: 'Async Workspace',
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    ])
+    mockedGetDesktopBridge.mockReturnValue({
+      platform: 'darwin',
+      workspace: {} as never,
+      projects: { list, listAsync } as never,
+      cost: {} as never,
+      assets: {} as never,
+      exports: {} as never,
+      tasks: {} as never,
+      agents: {} as never,
+      modelCatalog: {} as never,
+    })
+
+    const projects = await listLocalProjectsAsync()
+
+    expect(list).not.toHaveBeenCalled()
+    expect(listAsync).toHaveBeenCalledTimes(1)
+    expect(projects).toEqual([expect.objectContaining({ id: 'ws-list', name: 'Async Workspace' })])
+  })
+
+  it('desktop saveLocalProjectAsync uses the provided summary without reading the full old project', async () => {
+    const payload = createDefaultWorkbenchProjectPayload()
+    const readAsync = vi.fn(async () => {
+      throw new Error('readAsync should not be called when a base summary is provided')
+    })
+    const saveAsync = vi.fn(async (_projectId: string, record: unknown) => record)
+    mockedGetDesktopBridge.mockReturnValue({
+      platform: 'darwin',
+      workspace: {} as never,
+      projects: {
+        read: vi.fn(),
+        readAsync,
+        saveAsync,
+      } as never,
+      cost: {} as never,
+      assets: {} as never,
+      exports: {} as never,
+      tasks: {} as never,
+      agents: {} as never,
+      modelCatalog: {} as never,
+    })
+
+    const saved = await saveLocalProjectAsync('ws-fast-save', payload, 'Fast Save', {
+      id: 'ws-fast-save',
+      name: 'Fast Save',
+      createdAt: 10,
+      updatedAt: 20,
+      revision: 7,
+      savedAt: 20,
+    })
+
+    expect(readAsync).not.toHaveBeenCalled()
+    expect(saveAsync).toHaveBeenCalledTimes(1)
+    expect(saved).toMatchObject({
+      id: 'ws-fast-save',
+      name: 'Fast Save',
+      createdAt: 10,
+      revision: 8,
+      payload,
+    })
   })
 })

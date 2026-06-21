@@ -21,6 +21,7 @@ import { getDesktopBridge } from "../../desktop/bridge";
 import { normalizeCategories } from "./projectCategories";
 import { buildTemplateCategories, getProjectTemplate } from "../library/projectTemplates";
 import { createDefaultWorkbenchDocument } from "../workbenchTypes";
+import { timeStartupStep, timeStartupStepAsync } from "../../utils/startupDiagnostics";
 
 function extractCanvasThumbnailUrls(
     nodes: GenerationCanvasNode[],
@@ -54,18 +55,34 @@ const PROJECT_BACKUP_INDEX_PREFIX =
     "tapcanvas-open-workbench-project-backup-index-v1:";
 const MAX_PROJECT_BACKUPS = 1;
 
-// Clear old backups on load to prevent localStorage quota issues
-if (typeof window !== "undefined") {
+function cleanupOldProjectBackups(): void {
     try {
-        for (let i = 0; i < window.localStorage.length; i++) {
-            const k = window.localStorage.key(i);
-            if (k?.startsWith(PROJECT_BACKUP_PREFIX))
-                window.localStorage.removeItem(k);
+        for (const key of readStorageKeys()) {
+            if (key.startsWith(PROJECT_BACKUP_PREFIX)) removeStorageKey(key);
         }
     } catch {
         /* ignore */
     }
 }
+
+function scheduleOldBackupCleanup(): void {
+    if (typeof window === "undefined") return;
+    const idleWindow = window as Window & {
+        requestIdleCallback?: (
+            callback: IdleRequestCallback,
+            options?: IdleRequestOptions,
+        ) => number;
+    };
+    if (idleWindow.requestIdleCallback) {
+        idleWindow.requestIdleCallback(cleanupOldProjectBackups, {
+            timeout: 3000,
+        });
+        return;
+    }
+    window.setTimeout(cleanupOldProjectBackups, 1500);
+}
+
+scheduleOldBackupCleanup();
 
 function readJson(key: string): unknown {
     if (typeof window === "undefined") return null;
@@ -391,8 +408,12 @@ function rememberProjectBackup(projectId: string, rawRecord: unknown): void {
 export function listLocalProjects(): WorkbenchProjectSummary[] {
     const desktop = getDesktopBridge();
     if (desktop) {
-        return (desktop.projects.list() as WorkbenchProjectSummary[]).sort(
-            (a, b) => b.updatedAt - a.updatedAt,
+        return timeStartupStep(
+            "desktop.projects.list",
+            () =>
+                (desktop.projects.list() as WorkbenchProjectSummary[]).sort(
+                    (a, b) => b.updatedAt - a.updatedAt,
+                ),
         );
     }
     return readMergedProjectSummaries().map((summary) => {
@@ -411,6 +432,20 @@ export function listLocalProjects(): WorkbenchProjectSummary[] {
         }
         return summary;
     });
+}
+
+export async function listLocalProjectsAsync(): Promise<WorkbenchProjectSummary[]> {
+    const desktop = getDesktopBridge();
+    if (!desktop?.projects.listAsync) {
+        return listLocalProjects();
+    }
+    return timeStartupStepAsync(
+        "desktop.projects.listAsync",
+        async () =>
+            ((await desktop.projects.listAsync!()) as WorkbenchProjectSummary[]).sort(
+                (a, b) => b.updatedAt - a.updatedAt,
+            ),
+    );
 }
 
 function seedDocFromMarkdown(markdown: string): unknown {
@@ -501,13 +536,39 @@ export function readLocalProject(
               )
             : null;
     }
+    const raw = readJson(projectRecordKey(id));
+    if (raw) {
+        const summary = normalizeSummary(raw);
+        if (!summary) {
+            throw new Error(`本地项目记录损坏：${id}`);
+        }
+        return normalizeRecord(summary, raw);
+    }
     const summary = readMergedProjectSummaries().find((item) => item.id === id);
     if (!summary) return null;
-    const raw = readJson(projectRecordKey(id));
-    if (!raw) {
-        throw new Error(`本地项目记录缺失：${id}`);
+    throw new Error(`本地项目记录缺失：${id}`);
+}
+
+export async function readLocalProjectAsync(
+    projectId: string,
+): Promise<WorkbenchProjectRecordV1 | null> {
+    const id = String(projectId || "").trim();
+    if (!id) return null;
+    const desktop = getDesktopBridge();
+    if (!desktop?.projects.readAsync) {
+        return readLocalProject(id);
     }
-    return normalizeRecord(summary, raw);
+    const record = await timeStartupStepAsync(
+        "desktop.projects.readAsync",
+        () => desktop.projects.readAsync!(id),
+        500,
+    );
+    return record
+        ? normalizeRecord(
+              normalizeSummary(record) || (record as WorkbenchProjectSummary),
+              record,
+          )
+        : null;
 }
 
 export function saveLocalProject(
@@ -575,6 +636,58 @@ export function saveLocalProject(
     writeJson(projectRecordKey(id), record);
     writeIndex(nextIndex);
     return record;
+}
+
+export async function saveLocalProjectAsync(
+    projectId: string,
+    state: {
+        workbenchDocument: WorkbenchDocument;
+        timeline: TimelineState;
+        generationCanvas: GenerationCanvasSnapshot;
+    },
+    name?: string,
+    baseSummary?: WorkbenchProjectSummary,
+): Promise<WorkbenchProjectRecordV1> {
+    const desktop = getDesktopBridge();
+    if (!desktop?.projects.saveAsync) {
+        return saveLocalProject(projectId, state, name);
+    }
+
+    const id = String(projectId || "").trim();
+    if (!id) throw new Error("projectId is required");
+    const existing = baseSummary || null;
+    const existingRevision = existing?.revision ?? 0;
+    const now = Date.now();
+    const thumbnailUrls = extractCanvasThumbnailUrls(
+        state.generationCanvas.nodes,
+    );
+    const thumbnail = thumbnailUrls[0] || existing?.thumbnail;
+    const summary: WorkbenchProjectSummary = {
+        id,
+        name:
+            typeof name === "string" && name.trim()
+                ? name.trim()
+                : existing?.name || "未命名项目",
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+        revision: existingRevision + 1,
+        savedAt: now,
+        ...(existing?.thumbStyle ? { thumbStyle: existing.thumbStyle } : {}),
+        ...(thumbnail ? { thumbnail } : {}),
+        ...(thumbnailUrls.length
+            ? { thumbnailUrls }
+            : existing?.thumbnailUrls?.length
+              ? { thumbnailUrls: existing.thumbnailUrls }
+              : {}),
+    };
+    const payload = normalizePayload(state);
+    const record: WorkbenchProjectRecordV1 = {
+        ...summary,
+        version: 1,
+        payload,
+    };
+    assertWorkbenchProjectMediaUrlsPersistable(record);
+    return desktop.projects.saveAsync(id, record) as Promise<WorkbenchProjectRecordV1>;
 }
 
 export function deleteLocalProject(projectId: string): void {

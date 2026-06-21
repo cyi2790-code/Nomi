@@ -1,5 +1,6 @@
 import { IconSend2, IconX } from '@tabler/icons-react'
-import { NomiAILabel, WorkbenchButton, WorkbenchIconButton } from '../../../design'
+import { NomiAILabel } from '../../../design/identity'
+import { WorkbenchButton, WorkbenchIconButton } from '../../../design/workbenchActions'
 import React from 'react'
 import { cn } from '../../../utils/cn'
 import {
@@ -64,6 +65,7 @@ function summarizeToolCall(toolName: string, args: unknown): string {
 
 type CanvasAssistantPanelProps = {
   defaultCollapsed?: boolean
+  initialStoryboardRequest?: StoryboardPlanningRequest | null
   onCollapsedChange?: (collapsed: boolean) => void
 }
 
@@ -73,6 +75,7 @@ function createMessageId(): string {
 
 export default function CanvasAssistantPanel({
   defaultCollapsed = false,
+  initialStoryboardRequest = null,
   onCollapsedChange,
 }: CanvasAssistantPanelProps): JSX.Element {
   const nodes = useGenerationCanvasStore((state) => state.nodes)
@@ -112,6 +115,7 @@ export default function CanvasAssistantPanel({
   const setMessages = useGenerationCanvasStore((state) => state.setGenerationAiMessages)
   const setCollapsed = useGenerationCanvasStore((state) => state.setGenerationAiCollapsed)
   const resetConversation = useGenerationCanvasStore((state) => state.resetGenerationAiConversation)
+  const handledInitialStoryboardRequestRef = React.useRef<StoryboardPlanningRequest | null>(null)
 
   React.useEffect(() => {
     if (messages.length === 0 && !draft.trim()) setCollapsed(defaultCollapsed)
@@ -311,6 +315,19 @@ export default function CanvasAssistantPanel({
     window.addEventListener(STORYBOARD_PLANNING_EVENT, handler as EventListener)
     return () => window.removeEventListener(STORYBOARD_PLANNING_EVENT, handler as EventListener)
   }, [setCollapsed, submitAgentMessage])
+
+  React.useEffect(() => {
+    if (!initialStoryboardRequest || handledInitialStoryboardRequestRef.current === initialStoryboardRequest) return
+    const storyText = initialStoryboardRequest.storyText?.trim() || ''
+    if (!storyText) return
+    handledInitialStoryboardRequestRef.current = initialStoryboardRequest
+    setCollapsed(false)
+    const message = buildStoryboardPlanningMessage(storyText)
+    submitAgentMessage(message, {
+      skill: STORYBOARD_PLANNER_SKILL,
+      displayMessage: `🎬 拆镜头\n\n${storyText}`,
+    })
+  }, [initialStoryboardRequest, setCollapsed, submitAgentMessage])
 
   const handleNewConversation = React.useCallback(() => {
     setPendingToolCalls([])

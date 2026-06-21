@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { initializeWorkspace, readWorkspaceManifest, writeWorkspaceManifest } from "./workspaceManifest";
-import { listRecentWorkspaces, rememberWorkspace, removeWorkspaceReference } from "./workspaceRegistry";
+import { initializeWorkspace, readWorkspaceManifest, readWorkspaceManifestSummary, writeWorkspaceManifest } from "./workspaceManifest";
+import { findRecentWorkspace, listRecentWorkspaces, rememberWorkspace, removeWorkspaceReference } from "./workspaceRegistry";
 import { normalizeWorkspaceProjectRecord, type WorkspaceProjectRecordV2 } from "./workspaceTypes";
 
 export type WorkspaceRepositoryDeps = {
@@ -19,6 +19,22 @@ type RecordInput = {
   name?: unknown;
   payload?: unknown;
 };
+
+function nowMs(): number {
+  return performance.now();
+}
+
+function timeWorkspaceStep<T>(label: string, work: () => T, warnMs = 250): T {
+  const startedAt = nowMs();
+  try {
+    return work();
+  } finally {
+    const duration = nowMs() - startedAt;
+    if (duration >= warnMs) {
+      console.info(`[nomi:desktop:start] ${label} took ${duration.toFixed(1)}ms`);
+    }
+  }
+}
 
 function asRecordInput(input: unknown): RecordInput {
   return input && typeof input === "object" ? (input as RecordInput) : { payload: input };
@@ -44,7 +60,11 @@ function withoutPayload(record: WorkspaceProjectRecordV2, rootPath: string, miss
 }
 
 function findRecentEntry(projectId: string, deps: WorkspaceRepositoryDeps) {
-  return listRecentWorkspaces(deps.settingsRoot).find((entry) => entry.id === projectId) ?? null;
+  return timeWorkspaceStep(
+    "workspace.findRecentEntry",
+    () => findRecentWorkspace(deps.settingsRoot, projectId),
+    100,
+  );
 }
 
 export function createWorkspaceProject(
@@ -86,7 +106,7 @@ export function listWorkspaceProjects(deps: WorkspaceRepositoryDeps): WorkspaceP
         true,
       );
     }
-    const manifest = readWorkspaceManifest(entry.rootPath);
+    const manifest = readWorkspaceManifestSummary(entry.rootPath);
     if (!manifest || manifest.id !== entry.id) {
       return withoutPayload(
         normalizeWorkspaceProjectRecord({
@@ -112,7 +132,11 @@ export function readWorkspaceProject(projectId: string, deps: WorkspaceRepositor
   if (!entry || entry.missing) {
     return null;
   }
-  const manifest = readWorkspaceManifest(entry.rootPath);
+  const manifest = timeWorkspaceStep(
+    "workspace.readManifest",
+    () => readWorkspaceManifest(entry.rootPath),
+    250,
+  );
   if (!manifest || manifest.id !== projectId) {
     return null;
   }
@@ -128,18 +152,29 @@ export function saveWorkspaceProject(
   if (!entry || entry.missing) {
     throw new Error(`Workspace project not found: ${projectId}`);
   }
-  const existing = readWorkspaceProject(projectId, deps);
+  const existing = readWorkspaceManifestSummary(entry.rootPath);
   if (!existing) {
     throw new Error(`Workspace project not found: ${projectId}`);
   }
+  const raw = asRecordInput(record);
+  const incomingRevision = typeof (record as { revision?: unknown } | null)?.revision === "number"
+    ? (record as { revision: number }).revision
+    : null;
   const now = Date.now();
   const next = normalizeWorkspaceProjectRecord({
     ...existing,
-    name: inputName(record, existing.name),
+    ...(
+      record && typeof record === "object" && !Array.isArray(record)
+        ? (record as Record<string, unknown>)
+        : {}
+    ),
+    id: projectId,
+    version: 2,
+    name: inputName(raw, existing.name),
     updatedAt: now,
     savedAt: now,
-    revision: existing.revision + 1,
-    payload: inputPayload(record),
+    revision: incomingRevision != null ? incomingRevision : existing.revision + 1,
+    payload: inputPayload(raw),
     lastKnownRootPath: entry.rootPath,
   });
   const written = writeWorkspaceManifest(entry.rootPath, next);
@@ -160,7 +195,7 @@ export function resolveWorkspaceProjectDir(projectId: string, deps: WorkspaceRep
   if (!entry || entry.missing || !fs.existsSync(entry.rootPath)) {
     return null;
   }
-  const manifest = readWorkspaceManifest(entry.rootPath);
+  const manifest = readWorkspaceManifestSummary(entry.rootPath);
   if (!manifest || manifest.id !== projectId) {
     return null;
   }

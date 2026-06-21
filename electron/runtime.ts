@@ -35,7 +35,13 @@ import {
   extractTaskId as extractTaskIdShared,
   looksLikeLogicalError,
 } from "./ai/requestPipeline";
-import { discoverLegacyProjects, isLegacyProjectSuppressed, suppressLegacyProjectRediscovery } from "./workspace/legacyProjectMigration";
+import {
+  discoverLegacyProjects,
+  isLegacyProjectSuppressed,
+  migrateLegacyProjectFolder,
+  readLegacyProjectSummary,
+  suppressLegacyProjectRediscovery,
+} from "./workspace/legacyProjectMigration";
 import {
   createWorkspaceProject,
   listWorkspaceProjects,
@@ -47,6 +53,7 @@ import {
 } from "./workspace/workspaceRepository";
 import { rememberWorkspace } from "./workspace/workspaceRegistry";
 import { resolveWorkspaceRelativePath } from "./workspace/workspacePaths";
+import { readWorkspaceManifestSummary } from "./workspace/workspaceManifest";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -337,6 +344,18 @@ function getWorkspaceRepositoryDeps(): WorkspaceRepositoryDeps {
   };
 }
 
+function timeRuntimeStartupStep<T>(label: string, work: () => T, warnMs = 250): T {
+  const startedAt = performance.now();
+  try {
+    return work();
+  } finally {
+    const duration = performance.now() - startedAt;
+    if (duration >= warnMs) {
+      console.info(`[nomi:desktop:start] runtime.${label} took ${duration.toFixed(1)}ms`);
+    }
+  }
+}
+
 function getSkillsRoots(): string[] {
   const candidates = [
     String(process.env[SKILLS_ROOT_ENV] || "").trim(),
@@ -526,18 +545,24 @@ function normalizeProjectRecord(input: unknown): ProjectRecord {
 }
 
 function legacyProjectDirById(projectId: string): string | null {
-  const root = getProjectsRoot();
-  ensureDir(root);
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const projectFile = path.join(root, entry.name, PROJECT_FILE);
-    const projectDir = path.join(root, entry.name);
-    if (isLegacyProjectSuppressed(projectDir)) continue;
-    if (!fs.existsSync(projectFile)) continue;
-    const record = readJson<ProjectRecord | null>(projectFile, null);
-    if (record?.id === projectId) return projectDir;
-  }
-  return null;
+  return timeRuntimeStartupStep(
+    "legacyProjectDirById",
+    () => {
+      const root = getProjectsRoot();
+      ensureDir(root);
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const projectDir = path.join(root, entry.name);
+        if (isLegacyProjectSuppressed(projectDir)) continue;
+        const workspaceSummary = readWorkspaceManifestSummary(projectDir);
+        if (workspaceSummary?.id === projectId) return projectDir;
+        const legacySummary = readLegacyProjectSummary(projectDir);
+        if (legacySummary?.id === projectId) return projectDir;
+      }
+      return null;
+    },
+    250,
+  );
 }
 
 function projectDirById(projectId: string): string | null {
@@ -563,10 +588,21 @@ function getInputRootPath(input: unknown): string | null {
 
 export function listProjects(): Array<Omit<ProjectRecord, "payload">> {
   const deps = getWorkspaceRepositoryDeps();
-  for (const legacyProject of discoverLegacyProjects(deps.defaultProjectsRoot)) {
-    rememberWorkspace(deps.settingsRoot, legacyProject);
+  const byId = new Map<string, Omit<ProjectRecord, "payload">>();
+  for (const project of listWorkspaceProjects(deps)) {
+    byId.set(project.id, project);
   }
-  return listWorkspaceProjects(deps).sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const legacyProject of discoverLegacyProjects(deps.defaultProjectsRoot)) {
+    const existing = byId.get(legacyProject.id);
+    if (existing && !existing.missing) continue;
+    const { payload: _payload, ...summary } = legacyProject;
+    byId.set(legacyProject.id, {
+      ...summary,
+      rootPath: legacyProject.lastKnownRootPath,
+      missing: false,
+    });
+  }
+  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export function createProject(input: unknown): ProjectRecord {
@@ -580,34 +616,52 @@ export function createProject(input: unknown): ProjectRecord {
 
 export function readProject(projectId: string): ProjectRecord | null {
   const id = String(projectId || "").trim();
-  const workspaceRecord = readWorkspaceProject(id, getWorkspaceRepositoryDeps());
+  const deps = getWorkspaceRepositoryDeps();
+  const workspaceRecord = timeRuntimeStartupStep(
+    "readWorkspaceProject",
+    () => readWorkspaceProject(id, deps),
+    250,
+  );
   if (workspaceRecord) return workspaceRecord;
 
   const projectDir = legacyProjectDirById(id);
   if (!projectDir) return null;
-  return normalizeProjectRecord(readJson<ProjectRecord>(path.join(projectDir, PROJECT_FILE), {} as ProjectRecord));
+  const migrated = timeRuntimeStartupStep(
+    "migrateLegacyProjectFolder",
+    () => migrateLegacyProjectFolder(projectDir),
+    250,
+  );
+  if (!migrated || migrated.id !== id) return null;
+  timeRuntimeStartupStep(
+    "rememberMigratedWorkspace",
+    () => rememberWorkspace(deps.settingsRoot, migrated),
+    100,
+  );
+  return migrated;
 }
 
 export function saveProject(projectId: string, input: unknown): ProjectRecord {
   const id = String(projectId || "").trim();
-  if (readWorkspaceProject(id, getWorkspaceRepositoryDeps())) {
-    return saveWorkspaceProject(id, input, getWorkspaceRepositoryDeps());
+  const deps = getWorkspaceRepositoryDeps();
+  if (resolveWorkspaceProjectDir(id, deps)) {
+    return saveWorkspaceProject(id, input, deps);
   }
 
   const projectDir = legacyProjectDirById(id);
   if (!projectDir) throw new Error("Cannot save unknown workspace project");
-  const record = normalizeProjectRecord({ ...(input as JsonRecord), id });
-  ensureProjectFolders(projectDir);
-  writeJson(path.join(projectDir, PROJECT_FILE), record);
-  return record;
+  const migrated = migrateLegacyProjectFolder(projectDir);
+  if (!migrated || migrated.id !== id) throw new Error("Cannot save unknown workspace project");
+  rememberWorkspace(deps.settingsRoot, migrated);
+  return saveWorkspaceProject(id, input, deps);
 }
 
 export function deleteProject(projectId: string): { id: string; deleted: boolean } {
   const id = String(projectId || "").trim();
   if (!id) throw new Error("projectId is required");
-  if (readWorkspaceProject(id, getWorkspaceRepositoryDeps())) {
-    const workspaceDir = resolveWorkspaceProjectDir(id, getWorkspaceRepositoryDeps());
-    const result = removeWorkspaceProjectReference(id, getWorkspaceRepositoryDeps());
+  const deps = getWorkspaceRepositoryDeps();
+  const workspaceDir = resolveWorkspaceProjectDir(id, deps);
+  if (workspaceDir) {
+    const result = removeWorkspaceProjectReference(id, deps);
     if (workspaceDir && fs.existsSync(path.join(workspaceDir, PROJECT_FILE))) {
       suppressLegacyProjectRediscovery(workspaceDir);
     }
@@ -616,18 +670,8 @@ export function deleteProject(projectId: string): { id: string; deleted: boolean
 
   const projectDir = legacyProjectDirById(id);
   if (!projectDir) return { id, deleted: false };
-  if (fs.existsSync(path.join(projectDir, ".nomi", PROJECT_FILE))) {
-    suppressLegacyProjectRediscovery(projectDir);
-    return { id, deleted: false };
-  }
-  const root = path.resolve(getProjectsRoot());
-  const resolvedProjectDir = path.resolve(projectDir);
-  const rootWithSep = `${root}${path.sep}`;
-  if (resolvedProjectDir === root || !resolvedProjectDir.startsWith(rootWithSep)) {
-    throw new Error("Refusing to delete a path outside the projects root");
-  }
-  fs.rmSync(resolvedProjectDir, { recursive: true, force: true });
-  return { id, deleted: true };
+  suppressLegacyProjectRediscovery(projectDir);
+  return { id, deleted: false };
 }
 
 export function resolveProjectRelativePath(projectId: string, relativePath: string): string {
