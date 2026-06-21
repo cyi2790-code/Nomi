@@ -565,20 +565,15 @@ export async function runTask(payload: unknown): Promise<TaskResult> {
   const taskId = `task-${crypto.randomUUID()}`;
   const mapping = findTaskMapping(vendorKey, kind, modelKey);
 
-  // 第四路 audio：TTS/Whisper 同步收口（二进制/multipart，不进 admit/poll）。
-  // 付费守卫：audio 必发 vendor，进来即校验消费令牌（媒体生成闸，docs/plan/2026-06-21-spend-confirmation-gate.md）。
-  if (wantedKind === "audio") {
-    assertAndConsumeSpendGrant(grantId, nodeId);
-    return runAudioTask({ vendor, model, apiKey, request, kind, taskId, projectId, nodeId, mapping });
-  }
+  // 第四路 audio：TTS/Whisper 同步收口（二进制/multipart）。付费守卫：必发 vendor，进来即校验消费令牌。
+  if (wantedKind === "audio") { assertAndConsumeSpendGrant(grantId, nodeId); return runAudioTask({ vendor, model, apiKey, request, kind, taskId, projectId, nodeId, mapping }); }
   if (mapping) {
     // S8 指纹缓存:同配方(参数没动)秒回上次成功结果,零 vendor 调用;强制重跑经 extras.forceRerun 绕读。
     const recipe = buildNormalizedRecipe({ vendor, model, mappingId: trim((mapping as unknown as JsonRecord).id), request });
     const fingerprint = recipeFingerprint(recipe);
     const cachedHit = readCachedTaskResult({ projectId, fingerprint, nodeId, extras: request.extras });
     if (cachedHit) return cachedHit as TaskResult;
-    // 付费守卫：缓存未命中 = 真发 vendor，发请求前校验消费令牌。
-    assertAndConsumeSpendGrant(grantId, nodeId);
+    assertAndConsumeSpendGrant(grantId, nodeId); // 付费守卫：缓存未命中=真发 vendor，发前校验消费令牌
     const executed = await executeProfileOperation({ vendor, model, apiKey, request, operation: mapping.create });
     const normalized = await buildProfileTaskResult({
       response: executed.response,
@@ -623,8 +618,7 @@ export async function runTask(payload: unknown): Promise<TaskResult> {
   const fallbackFingerprint = recipeFingerprint(fallbackRecipe);
   const fallbackHit = readCachedTaskResult({ projectId, fingerprint: fallbackFingerprint, nodeId, extras: request.extras });
   if (fallbackHit) return fallbackHit as TaskResult;
-  // 付费守卫：fallback 路径缓存未命中 = 真发 vendor，发请求前校验消费令牌。
-  assertAndConsumeSpendGrant(grantId, nodeId);
+  assertAndConsumeSpendGrant(grantId, nodeId); // 付费守卫：fallback 缓存未命中=真发 vendor，发前校验
   // 与 profile 路径同源走 requestJson（单一真相）：错误在抛出那刻即为结构化
   // VendorRequestError（401→auth/402→balance 查表），不再裸 Error 让下游正则反猜（修 #1）；
   // extraHeaders（网关头）也一并带上，与 profile 路径一致（修 #2 的 fallback 分支）。

@@ -264,12 +264,8 @@ function BaseGenerationNodeImpl({
     const renderKind = isAssetKind
         ? undefined
         : ((node.renderKind as string | undefined) ??
-          // 按 kind 渲染优先于按 categoryId（声音/角色/场景节点可建在任意分类——尤其拆镜头按
-          // 用户拍板 A 把角色/场景卡落进 shots 分类与镜头同屏可连参考边，此时仍要长成卡而非退化成
-          // 普通图片）。categoryId 仅作无 kind 信号时的兜底。
+          // audio kind 强制 audio-strip（声音节点可建在任意分类，按 kind 而非 categoryId 渲染）。
           (node.kind === "audio" ? "audio-strip"
-              : node.kind === "character" ? "character-card"
-              : node.kind === "scene" ? "scene-card"
               : node.categoryId === "cast" ? "character-card"
               : node.categoryId === "scene" ? "scene-card"
               : node.categoryId === "prop" ? "prop-card"
