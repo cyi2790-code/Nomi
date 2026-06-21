@@ -450,7 +450,7 @@
 
 .generation-canvas-v2-assistant__empty-title {
   color: var(--nomi-ink);
-  font-family: Fraunces, Inter, serif;
+  font-family: var(--nomi-font-display);
   font-size: 17px;
   font-weight: 500;
 }
