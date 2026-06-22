@@ -646,7 +646,13 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
         />
         <AttachmentRail attachments={attachments} onRemove={removeAttachment} className={cn('mb-2')} />
         <AutoGrowTextarea
-          className={cn('workbench-creation-ai__input', 'min-h-14')}
+          className={cn(
+            // 与画布助手输入框同一套 Tailwind（不再走 workbench-ai.css 的 !important 覆写）。
+            'min-h-14 px-2 py-2 rounded-nomi',
+            'border border-nomi-line focus:border-nomi-accent',
+            'bg-nomi-paper text-nomi-ink text-body-sm leading-[1.45]',
+            'placeholder:text-nomi-ink-40',
+          )}
           value={draft}
           placeholder="拆成镜头、做成视频、立张角色卡，或问我任何事…"
           aria-label="创作 AI 输入"
@@ -661,9 +667,9 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
           <div className={cn('flex items-center gap-1.5 flex-1 min-w-0')}>
             <WorkbenchIconButton
               className={cn(
-                'workbench-creation-ai__attach',
-                'shrink-0 size-7 inline-flex items-center justify-center cursor-pointer',
-                'text-nomi-ink-60 hover:text-nomi-ink',
+                'size-7 grid place-items-center shrink-0',
+                'border-0 rounded-nomi-sm bg-transparent text-nomi-ink-60 cursor-pointer',
+                'hover:bg-nomi-ink-05 hover:text-nomi-ink',
                 'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
               )}
               label="添加附件"
@@ -688,8 +694,9 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
           {sending ? (
             <WorkbenchIconButton
               className={cn(
-                'workbench-creation-ai__send',
-                'shrink-0 size-7 inline-flex items-center justify-center cursor-pointer',
+                'size-7 grid place-items-center shrink-0',
+                'border-0 rounded-full bg-nomi-ink text-nomi-paper cursor-pointer',
+                'hover:enabled:bg-nomi-accent',
                 'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
               )}
               label="停止"
@@ -700,9 +707,10 @@ export default function CreationAiPanel({ onCollapse }: { onCollapse?: () => voi
           ) : (
             <WorkbenchIconButton
               className={cn(
-                'workbench-creation-ai__send',
-                'shrink-0 size-7 inline-flex items-center justify-center cursor-pointer',
-                'disabled:cursor-not-allowed disabled:opacity-[0.48]',
+                'size-7 grid place-items-center shrink-0',
+                'border-0 rounded-full bg-nomi-ink text-nomi-paper cursor-pointer',
+                'hover:enabled:bg-nomi-accent',
+                'disabled:bg-nomi-ink-20 disabled:text-nomi-ink-40 disabled:cursor-not-allowed',
                 'focus-visible:outline-2 focus-visible:outline-workbench-focus focus-visible:outline-offset-2',
               )}
               label="发送"
