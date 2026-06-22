@@ -202,8 +202,12 @@ async function handle(message) {
   if (method === 'initialize') {
     // 记下客户端是否支持 elicitation（能代我们向真人弹确认对话框）。
     clientSupportsElicitation = Boolean(params?.capabilities?.elicitation)
+    // 协议版本回显客户端请求的版本（兼容性根因 R5 实证）：我们只用 tools + elicitation(能力门控降级)，
+    // 这俩跨各修订都在，故回显客户端所讲版本最大化兼容。硬回我们偏好的版本会让只讲更老协议的客户端
+    // 按规范 SHOULD 断开 → 连基础工具都用不了。客户端没给版本才回退我们的默认。
+    const negotiatedVersion = typeof params?.protocolVersion === 'string' && params.protocolVersion ? params.protocolVersion : PROTOCOL_VERSION
     reply(id, {
-      protocolVersion: PROTOCOL_VERSION,
+      protocolVersion: negotiatedVersion,
       capabilities: { tools: {} },
       serverInfo: { name: 'nomi-capability-core', version: '0.1.0' },
       instructions: '用 nomi_* 工具在本机驱动 Nomi：列项目/模型、建项目、读画布、加节点/连线/改提示词、触发生成。生成会花用户额度。',

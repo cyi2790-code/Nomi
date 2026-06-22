@@ -60,15 +60,16 @@ class McpHarness {
     })
   }
 
-  async initialize(elicitation: boolean): Promise<void> {
+  async initialize(elicitation: boolean, protocolVersion = '2025-11-25'): Promise<RpcMessage> {
     this.send({
       jsonrpc: '2.0',
       id: 1,
       method: 'initialize',
-      params: { protocolVersion: '2025-11-25', capabilities: elicitation ? { elicitation: {} } : {} },
+      params: { protocolVersion, capabilities: elicitation ? { elicitation: {} } : {} },
     })
     const res = await this.next()
     expect(res.id).toBe(1)
+    return res
   }
 
   dispose(): void {
@@ -116,6 +117,14 @@ describe('nomi-mcp · 付费 elicitation 握手（B 模式）', () => {
     const result = toolRes.result as { content: Array<{ text: string }>; isError?: boolean }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('已取消')
+  })
+
+  it('握手回显客户端请求的协议版本（兼容只讲老协议的客户端，如 Codex/Cursor 早期）', async () => {
+    harness = new McpHarness(emptyCapDir())
+    // 老客户端只讲 2025-03-26（elicitation 之前的修订）。
+    const res = await harness.initialize(false, '2025-03-26')
+    const result = res.result as { protocolVersion?: string }
+    expect(result.protocolVersion).toBe('2025-03-26')
   })
 
   it('客户端不支持 elicitation：generate → 不弹、回可操作错误', async () => {
