@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deriveCanonicalModelId, normalizeModelLabel, dedupeModelOptions } from './modelIdentity'
+import { deriveCanonicalModelId, normalizeModelLabel, dedupeModelOptions, resolveBestProvider, vendorTier } from './modelIdentity'
 import type { ModelOption } from './models'
 
 const opt = (o: Partial<ModelOption>): ModelOption => ({ value: '', label: '', ...o })
@@ -69,5 +69,44 @@ describe('modelIdentity · 去重聚合', () => {
     ])
     expect(result).toHaveLength(2)
     expect(result.every((m) => m.recognized === false)).toBe(true)
+  })
+})
+
+describe('modelIdentity · resolveBestProvider 自动选最优', () => {
+  const model = dedupeModelOptions([
+    opt({ value: 'a', label: 'Seedream 4.5', vendor: 'apimart', modelKey: 'a' }),
+    opt({ value: 'b', label: 'Seedream 4.5', vendor: 'volcengine', modelKey: 'b' }),
+    opt({ value: 'c', label: 'Seedream 4.5', vendor: 'myrelay', modelKey: 'c' }),
+  ])[0]
+
+  it('vendorTier：官方0 < 内置中转1 < 未知2', () => {
+    expect(vendorTier('volcengine')).toBe(0)
+    expect(vendorTier('apimart')).toBe(1)
+    expect(vendorTier('myrelay')).toBe(2)
+  })
+
+  it('默认选官方（volcengine）而非中转', () => {
+    expect(resolveBestProvider(model)?.vendor).toBe('volcengine')
+  })
+
+  it('锁定供应商优先（可用时）', () => {
+    expect(resolveBestProvider(model, { lockedVendorKey: 'apimart' })?.vendor).toBe('apimart')
+  })
+
+  it('锁定家不可用 → 回落自动选最优', () => {
+    expect(resolveBestProvider(model, { lockedVendorKey: 'nope', usableVendorKeys: new Set(['apimart', 'myrelay']) })?.vendor).toBe('apimart')
+  })
+
+  it('过滤到可用供应商集；全不可用返回 null', () => {
+    expect(resolveBestProvider(model, { usableVendorKeys: new Set(['myrelay']) })?.vendor).toBe('myrelay')
+    expect(resolveBestProvider(model, { usableVendorKeys: new Set(['x']) })).toBeNull()
+  })
+
+  it('同级保持 catalog 顺序（稳定）', () => {
+    const m = dedupeModelOptions([
+      opt({ value: '1', label: 'X', vendor: 'apimart', modelKey: '1' }),
+      opt({ value: '2', label: 'X', vendor: 'kie', modelKey: '2' }),
+    ])[0]
+    expect(resolveBestProvider(m)?.vendor).toBe('apimart')
   })
 })

@@ -101,7 +101,7 @@ export const APIMART_VIDEO_MODELS: ApimartVideoModel[] = [
   }),
   // Kling v3：共享 kie 的 kling-3.0 档案（i2v 结构对齐：image_urls 数组槽）+ apimart vendorParams。
   videoModel({
-    modelKey: "kling-v3", labelZh: "可灵 v3", archetypeId: "kling-3.0",
+    modelKey: "kling-v3", labelZh: "可灵 3.0", archetypeId: "kling-3.0",
     t2vBody: { mode: MODE, duration: DURATION, aspect_ratio: ASPECT, audio: AUDIO, negative_prompt: NEGATIVE_PROMPT },
     i2vBody: { mode: MODE, duration: DURATION, image_urls: IMAGE_URLS, audio: AUDIO, negative_prompt: NEGATIVE_PROMPT },
   }),

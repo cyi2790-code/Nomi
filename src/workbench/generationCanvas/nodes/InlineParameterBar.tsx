@@ -14,6 +14,7 @@ import {
   optionValue,
 } from './controls/parameterControlModel'
 import { resolveArchetypeForOption } from './nodeModelArchetype'
+import { useDedupedModelSelect } from '../../common/useDedupedModelSelect'
 
 type InlineParameterBarProps = {
   modelOptions: readonly ModelOption[]
@@ -46,6 +47,8 @@ export default function InlineParameterBar({
   activeVariantId,
   onVariantSelect,
 }: InlineParameterBarProps): JSX.Element {
+  // 去重选择 view-model（hook 必须在任何早返回前调用）。
+  const modelSelect = useDedupedModelSelect(modelOptions, selectedModelOption?.value || '', onModelChange)
   if (modelOptions.length === 0) {
     return (
       <button
@@ -127,10 +130,20 @@ export default function InlineParameterBar({
         ariaLabel="模型"
         placeholder="选择模型"
         triggerMaxWidth={150}
-        value={selectedModelOption?.value || ''}
-        options={modelOptions.map((option) => ({ value: option.value, label: option.label }))}
-        onChange={(v) => onModelChange(v)}
+        value={modelSelect.modelValue}
+        options={modelSelect.modelOptions}
+        onChange={modelSelect.onModelPick}
       />
+      {/* 供应商小下拉：仅当选中模型有多家可用时出现（去重后「N 家可用」点开切/锁定）。 */}
+      {modelSelect.providerOptions.length > 1 ? (
+        <NomiSelect
+          ariaLabel="供应商"
+          leadingLabel="供应商"
+          value={modelSelect.providerValue}
+          options={modelSelect.providerOptions}
+          onChange={modelSelect.onProviderPick}
+        />
+      ) : null}
       {/* 变体（型号）小下拉：紧跟模型芯片。有变体的模型(Seedance:标准/快速/真人/真人快速)才显示；无变体不占位。 */}
       {variantChoices && variantChoices.length > 1 ? (
         <NomiSelect

@@ -60,6 +60,41 @@ export function isRecognizedModel(option: ModelOption): boolean {
   return typeof meta.archetypeId === 'string' && meta.archetypeId.trim().length > 0
 }
 
+// 供应商分级（自动选最优：官方 > 内置中转 > 用户自接/未知）。是默认挑选的稳定排序键，
+// 不是硬限制——用户可在弹窗点开锁定任意一家。分级错了也只影响默认项，零生成风险。
+const OFFICIAL_VENDOR_KEYS = new Set([
+  'volcengine', 'modelscope', 'openai', 'anthropic', 'claude', 'gemini', 'google',
+  'deepseek', 'dashscope', 'zhipu', 'moonshot', 'kimi', 'siliconflow', 'groq', 'openrouter',
+])
+const BUILTIN_RELAY_VENDOR_KEYS = new Set(['apimart', 'kie', 'newapi'])
+
+export function vendorTier(vendorKey?: string): number {
+  const k = (vendorKey || '').toLowerCase()
+  if (OFFICIAL_VENDOR_KEYS.has(k)) return 0
+  if (BUILTIN_RELAY_VENDOR_KEYS.has(k)) return 1
+  return 2
+}
+
+export interface ResolveBestProviderOptions {
+  /** 用户锁定的供应商：在则优先用它（可用时）。 */
+  lockedVendorKey?: string | null
+  /** 仅在这些可用供应商里选（缺省=不过滤，picker 的 options 已是可用集）。 */
+  usableVendorKeys?: Set<string> | null
+}
+
+/** 自动选最优供应商：锁定家优先 → 官方 > 内置中转 > 其余；同级保持 catalog 顺序（稳定）。 */
+export function resolveBestProvider(model: DedupedModel, opts: ResolveBestProviderOptions = {}): ModelProviderRef | null {
+  const providers = model.providers.filter(
+    (p) => !opts.usableVendorKeys || (p.vendor != null && opts.usableVendorKeys.has(p.vendor)),
+  )
+  if (providers.length === 0) return null
+  if (opts.lockedVendorKey) {
+    const locked = providers.find((p) => p.vendor === opts.lockedVendorKey)
+    if (locked) return locked
+  }
+  return providers.reduce((best, p) => (vendorTier(p.vendor) < vendorTier(best.vendor) ? p : best), providers[0])
+}
+
 /** 按 canonical 身份聚合：同模型只一条，收集所有供应商；保持首次出现顺序。 */
 export function dedupeModelOptions(options: ModelOption[]): DedupedModel[] {
   if (!Array.isArray(options)) return []
