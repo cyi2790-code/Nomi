@@ -11,11 +11,8 @@ import ProvenancePanel from "./ProvenancePanel";
 import { resolveNodeRenderKind, isCardRenderKind } from "./resolveRenderKind";
 import ShotMountBadges from "./render/ShotMountBadges";
 import { getBuiltinCategoryById } from "../../project/projectCategories";
-import CharacterCardNode from "./render/CharacterCardNode";
+import { NodeCardBody } from "./render/NodeCardBody";
 import TextDocumentNode from "./render/TextDocumentNode";
-import SceneCardNode from "./render/SceneCardNode";
-import PropCardNode from "./render/PropCardNode";
-import AudioStripNode from "./render/AudioStripNode";
 import ImageCropGridOverlay from "./render/ImageCropGridOverlay";
 import NodeImageEditToolbar from "./NodeImageEditToolbar";
 import NodeResultDownloadButton from "./NodeResultDownloadButton";
@@ -617,21 +614,8 @@ function BaseGenerationNodeImpl({
                 <NodeRecoverableReport onRecover={() => { void recoverNodeResult(node.id) }} onDismiss={() => { dismissRecoverableNode(node.id) }} />
             ) : null}
 
-            {/* [DESIGN-CARDS-07] 卡片分发：非 shots 分类渲染对应 card 组件（preview div + composer 隐藏）。 */}
-            {isCardKind ? (
-                <div className='w-full h-full rounded-nomi shadow-nomi-md overflow-hidden ring-1 ring-inset ring-nomi-line'>
-                    {renderKind === "character-card" && (
-                        <CharacterCardNode node={node} />
-                    )}
-                    {renderKind === "scene-card" && (
-                        <SceneCardNode node={node} />
-                    )}
-                    {renderKind === "prop-card" && <PropCardNode node={node} />}
-                    {renderKind === "audio-strip" && (
-                        <AudioStripNode node={node} />
-                    )}
-                </div>
-            ) : null}
+            {/* [DESIGN-CARDS-07] 卡片分发抽到 NodeCardBody（R9 治巨壳）：非 shots 分类共用外壳只换 body。 */}
+            {isCardKind ? <NodeCardBody renderKind={renderKind} node={node} readOnly={readOnly} /> : null}
 
             {/* C5: 文本节点。外层不裁剪让浮动格式条浮到节点上方（圆角/阴影/裁剪在 TextDocumentNode 内层 body）。 */}
             {isTextKind ? (
@@ -827,6 +811,7 @@ function BaseGenerationNodeImpl({
             !readOnly &&
             node.kind !== "panorama" &&
             node.kind !== "scene3d" &&
+            node.kind !== "whiteboard" &&
             !isAssetKind ? (
                 <NodeGenerationComposer node={node} visualSize={visualSize} />
             ) : null}
