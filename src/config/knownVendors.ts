@@ -163,6 +163,20 @@ export const KNOWN_VENDORS: readonly KnownVendor[] = [
       url: 'https://console.volcengine.com/speech/app',
     },
   },
+  {
+    // Replicate：图片「元素拆解」(qwen-image-layered) 的托管端点。本机跑不动 57GB 模型，必须走云；
+    // 一把 r8_ token 即可（按量付费，约 $0.05/张）。见 docs/plan/2026-06-28-element-decomposition-feature.md。
+    vendorKey: 'replicate',
+    glyph: 'R',
+    tagline: '一个 token，解锁「元素拆解」（一张图拆成可编辑图层）',
+    credentialPlaceholder: '粘贴 Replicate API Token（r8_…）',
+    credentialHint: '用于「元素拆解」(qwen-image-layered，约 $0.05/张，按量付费)。登录 Replicate → Account → API tokens 里拿。凭证本地加密存储、只在调用时使用。',
+    promo: {
+      text: 'Replicate 托管 qwen-image-layered（开源 Apache 2.0），把一张图拆成前景/背景/元素多个可编辑图层。注册后在 Account 里拿 API token，按量付费。',
+      ctaLabel: '去 Replicate 拿 token',
+      url: 'https://replicate.com/account/api-tokens',
+    },
+  },
 ] as const
 
 const KNOWN_VENDOR_BY_KEY = new Map<string, KnownVendor>(

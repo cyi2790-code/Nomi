@@ -1,5 +1,5 @@
 import React from 'react'
-import { IconBrush, IconCrop, IconDownload, IconFlipHorizontal, IconFlipVertical, IconGrid3x3, IconGridDots, IconLayoutGrid, IconRotate2, IconRotateClockwise2, IconScissors, IconSparkles, IconTransform, IconTypography } from '@tabler/icons-react'
+import { IconBrush, IconCrop, IconDownload, IconFlipHorizontal, IconFlipVertical, IconGrid3x3, IconGridDots, IconLayersSubtract, IconLayoutGrid, IconRotate2, IconRotateClockwise2, IconScissors, IconSparkles, IconTransform, IconTypography, IconWand } from '@tabler/icons-react'
 import { IMAGE_TRANSFORM_LABEL, type ImageGridSize, type ImageTransformOp } from './useNodeImageEditing'
 import type { CropGridSize } from './render/ImageCropGridOverlay'
 import { useResultDownload } from './useResultDownload'
@@ -8,6 +8,7 @@ import type { GenerationCanvasNode } from '../model/generationCanvasTypes'
 import WhiteboardModal from './whiteboard/WhiteboardModal'
 import { inferWhiteboardAspectRatio, readWhiteboardState } from './whiteboard/whiteboardState'
 import { applyTextEdit } from '../textEdit/buildTextEditNode'
+import { useDecomposeLayers } from './decompose/useDecomposeLayers'
 import { NomiLoadingMark } from '../../../design'
 
 // 图片节点编辑浮条（方案 B 分组，用户拍板）：定妆 ｜ 裁剪 · 切图▾ · 变换▾ ｜ 下载。
@@ -31,8 +32,13 @@ type Props = {
 export default function NodeImageEditToolbar({ node, editGrid, imageOpBusy, onGridSplit, onCrop, onTransform, onRemoveBackground, removeBackgroundBusy = false, onMakeup }: Props): JSX.Element {
   const { downloading, download } = useResultDownload(node)
   const [whiteboardOpen, setWhiteboardOpen] = React.useState(false)
-  const busy = editGrid !== null || imageOpBusy || removeBackgroundBusy
   const imageUrl = node.result?.type === 'image' ? node.result.url || '' : ''
+  const { decomposeBusy, decomposeState, runDecompose, clearDecompose } = useDecomposeLayers(node, imageUrl)
+  const busy = editGrid !== null || imageOpBusy || removeBackgroundBusy || decomposeBusy
+  // 拆解出图后自动打开白板（effect-first：用户立刻看到一堆可抓的元素，设计评审定）。
+  React.useEffect(() => {
+    if (decomposeState) setWhiteboardOpen(true)
+  }, [decomposeState])
   return (
     <>
       <FloatingToolbarShell ariaLabel="图片操作">
@@ -45,12 +51,14 @@ export default function NodeImageEditToolbar({ node, editGrid, imageOpBusy, onGr
             onClick={onMakeup}
           />
         ) : null}
-        <ToolbarButton
-          icon={<IconTypography size={I.size} stroke={I.stroke} />}
-          label="改字"
-          title="改字：基于这张图，预填一份「把旧字改成新字、保留字体/风格」改图提示词到新节点（不自动生成）"
+        <ToolbarMenu
+          icon={decomposeBusy ? <NomiLoadingMark size={I.size} /> : <IconWand size={I.size} stroke={I.stroke} />}
+          label={decomposeBusy ? '拆解中' : 'AI 编辑'}
           disabled={busy || !imageUrl}
-          onClick={() => applyTextEdit(node)}
+          items={[
+            { icon: <IconLayersSubtract size={I.size} stroke={I.stroke} />, label: '拆解元素（拆成可编辑图层）', onClick: () => { void runDecompose() } },
+            { icon: <IconTypography size={I.size} stroke={I.stroke} />, label: '改字（保留字体改文字）', onClick: () => applyTextEdit(node) },
+          ]}
         />
         <ToolbarDivider />
         <ToolbarButton
@@ -111,13 +119,12 @@ export default function NodeImageEditToolbar({ node, editGrid, imageOpBusy, onGr
         <WhiteboardModal
           nodeId={node.id}
           sourceKind="image"
-          nodeTitle={`${node.title || '图片'} · 画板`}
-          initialState={readWhiteboardState(node)}
-          initialImage={{
-            url: imageUrl,
-            aspectRatio: inferWhiteboardAspectRatio(node.meta?.imageWidth, node.meta?.imageHeight),
-          }}
-          onClose={() => setWhiteboardOpen(false)}
+          nodeTitle={`${node.title || '图片'} · ${decomposeState ? '拆解元素' : '画板'}`}
+          initialState={decomposeState ?? readWhiteboardState(node)}
+          {...(decomposeState
+            ? {}
+            : { initialImage: { url: imageUrl, aspectRatio: inferWhiteboardAspectRatio(node.meta?.imageWidth, node.meta?.imageHeight) } })}
+          onClose={() => { setWhiteboardOpen(false); clearDecompose() }}
         />
       ) : null}
     </>

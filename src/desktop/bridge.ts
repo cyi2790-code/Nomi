@@ -139,6 +139,16 @@ export type DesktopBridge = {
       forceRerun?: boolean
     }) => Promise<{ url: string }>
   }
+  image: {
+    /** 元素拆解：一张图 → Replicate qwen-image-layered → N 张落地 RGBA 图层 URL（对标 Lovart Edit Elements）。
+     *  走付费令牌（grantId）；见 electron/image/decomposeLayers.ts。 */
+    decomposeLayers: (payload: {
+      nodeId?: string
+      imageUrl: string
+      numLayers?: number
+      grantId?: string
+    }) => Promise<{ layers: string[] }>
+  }
   scene3d: {
     /** N 帧 PNG dataURL（沿相机轨迹采样）→ ffmpeg 拼 H.264 mp4 → 项目素材。
      *  AI 运镜工具的「轨迹→视频文件」桥，见 electron/video/framesToVideo.ts。 */

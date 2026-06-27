@@ -42,6 +42,10 @@ contextBridge.exposeInMainWorld("nomiDesktop", {
     extractFrame: (payload: unknown) =>
       ipcRenderer.invoke("nomi:video:extract-frame", payload) as Promise<{ url: string }>,
   },
+  image: {
+    decomposeLayers: (payload: unknown) =>
+      ipcRenderer.invoke("nomi:image:decompose-layers", payload) as Promise<{ layers: string[] }>,
+  },
   dreamina: {
     status: () => ipcRenderer.invoke("nomi:dreamina:status"),
     loginStart: () => ipcRenderer.invoke("nomi:dreamina:login-start"),
