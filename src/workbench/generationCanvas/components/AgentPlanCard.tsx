@@ -11,6 +11,7 @@ import {
   type PlannedNode,
 } from './agentPlanSummary'
 import { listAvailableModelsForAgent, type AgentModelEntry } from '../agent/availableModels'
+import { normalizeAspectRatioToWH } from '../nodes/aspectRatio'
 
 export { summarizeAgentPlan }
 
@@ -37,12 +38,11 @@ const edgeKey = (edge: PlannedEdge): string => `${edge.sourceClientId}→${edge.
 function nodeChipValues(node: PlannedNode, entryByKey: ReadonlyMap<string, AgentModelEntry>) {
   if (!node.modelKey) return null
   const params = node.params ?? {}
-  const aspect =
-    typeof params.aspect_ratio === 'string'
-      ? params.aspect_ratio
-      : typeof params.size === 'string'
-        ? params.size
-        : undefined
+  // 「比例」chip 只认真正能解析成 W:H 的值（单一真相源 normalizeAspectRatioToWH）：
+  // 多数档案用 aspect_ratio；imagen4/qwen 用 size 存比例（如 "16:9"）。但有些档案 size 存的是
+  // 【像素串】（如 "448x1024"，竖屏短边由翻译层算出 ≈448）——那不是比例，绝不能塞进「比例」chip
+  // （曾把像素短边显示成「比例 440 什么的」误导用户）。解析不出比例就不显示比例 chip。
+  const aspect = normalizeAspectRatioToWH(params.aspect_ratio) ?? normalizeAspectRatioToWH(params.size) ?? undefined
   const resolution = typeof params.resolution === 'string' ? params.resolution : undefined
   return {
     modelLabel: entryByKey.get(node.modelKey)?.label ?? node.modelKey,

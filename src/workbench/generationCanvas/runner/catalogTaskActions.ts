@@ -37,6 +37,10 @@ export { normalizeCatalogTaskResult } from './catalogTaskResultParse'
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed'])
 
+// 任务已提交(付费已发生)后，查结果连续失败多久就放弃轮询、落「可找回」态（不重发，给「重新拉取」入口）。
+// 短于此 = 网络抖动，免费重试查询；长于此 = 上游/网络持续不可达，没必要干等到硬超时(视频 20min)空耗。
+const POLL_FAILURE_GRACE_MS = 45000
+
 // 走流式文本通道的 kind(与 catalogTaskResultParse 的 TEXT_TASK_KINDS 同语义)。
 const TEXT_STREAM_KINDS = new Set<TaskKind>(['chat', 'prompt_refine', 'image_to_prompt'])
 
@@ -188,17 +192,23 @@ async function waitForCatalogTaskResult(
   const startedAt = Date.now()
   const fetchResult = options.fetchTaskResult || fetchWorkbenchTaskResultByVendor
 
+  // ⚠️ 钱安全铁律：到这里 runTask 已成功、付费已发生(initialResult.id 是真任务)。本轮询【只查不提交】，
+  // 且查结果失败【绝不】能冒泡出去——否则会落进外层 runGenerationNode 的重试循环重新 runTask 二次扣费
+  // (单确认最多 ×3/节点、批量再乘节点数 = 用户报「平台冒出很多视频、被扣费」的根因)。查结果是免费的：
+  // 抖动就免费重试查询；持续失败超 grace(或到硬超时) → 落可找回态(不重发)。recoverable 在外层不触发重试。
+  const recoverableTimeout = () => new RecoverableTimeoutError({
+    taskId: initialResult.id,
+    vendor,
+    taskKind: request.kind,
+    modelKey: asTrimmedString(request.extras?.modelKey),
+  })
   let current = initialResult
+  let pollFailureStreakStartedAt: number | null = null
   while (!TERMINAL_STATUSES.has(current.status)) {
     const elapsedMs = Date.now() - startedAt
     if (elapsedMs > hardTimeoutMs) {
       // 超时≠失败：上游可能仍在跑/已出片 → 抛可找回错误，节点落 recoverable，给「重新拉取」入口。
-      throw new RecoverableTimeoutError({
-        taskId: initialResult.id,
-        vendor,
-        taskKind: request.kind,
-        modelKey: asTrimmedString(request.extras?.modelKey),
-      })
+      throw recoverableTimeout()
     }
     // S2:每个轮询 tick 回报进度(人话 + 已等秒数),不再静默吞掉 status。软超时后切「仍在生成·已超常规时长」。
     const overSoft = elapsedMs > softTimeoutMs
@@ -208,14 +218,30 @@ async function waitForCatalogTaskResult(
       taskId: initialResult.id,
     })
     await delay(pollIntervalMs)
-    const response = await fetchResult({
-      taskId: initialResult.id,
-      vendor,
-      taskKind: request.kind,
-      prompt: request.prompt,
-      modelKey: asTrimmedString(request.extras?.modelKey) || null,
-    })
-    current = response.result
+    try {
+      const response = await fetchResult({
+        taskId: initialResult.id,
+        vendor,
+        taskKind: request.kind,
+        prompt: request.prompt,
+        modelKey: asTrimmedString(request.extras?.modelKey) || null,
+      })
+      current = response.result
+      pollFailureStreakStartedAt = null // 查成功 → 重置失败连击计数
+    } catch {
+      // 查结果失败：免费重试(下一轮再查)，绝不冒泡触发重发。持续失败超 grace 或已到硬超时 → 落可找回。
+      const now = Date.now()
+      if (pollFailureStreakStartedAt == null) pollFailureStreakStartedAt = now
+      if (now - pollFailureStreakStartedAt > POLL_FAILURE_GRACE_MS || now - startedAt > hardTimeoutMs) {
+        throw recoverableTimeout()
+      }
+      // 仍在 grace 内：回报「仍在生成」(对用户=后台还在等)，继续下一轮免费查询。
+      options.onProgress?.({
+        phase: 'still-generating',
+        message: narrateProgress('still-generating', { elapsedMs: now - startedAt }),
+        taskId: initialResult.id,
+      })
+    }
   }
   return current
 }

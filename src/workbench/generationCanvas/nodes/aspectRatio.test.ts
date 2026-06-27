@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAspectRatioValue, readNodeAspectRatio } from "./aspectRatio";
+import { normalizeAspectRatioToWH, parseAspectRatioValue, readNodeAspectRatio } from "./aspectRatio";
 import type { GenerationCanvasNode } from "../model/generationCanvasTypes";
 
 describe("parseAspectRatioValue", () => {
@@ -25,6 +25,22 @@ describe("parseAspectRatioValue", () => {
     expect(parseAspectRatioValue(undefined)).toBeNull();
     expect(parseAspectRatioValue(16 / 9)).toBeNull();
     expect(parseAspectRatioValue(null)).toBeNull();
+  });
+});
+
+// 回归（2026-06-27 用户报「尺寸显示成 440」）：像素尺寸串绝不能被当成比例。
+// AgentPlanCard 的「比例」chip 用这个判定——返回 null 就不显示比例 chip，不会把 448x1024 误标成「比例」。
+describe("normalizeAspectRatioToWH — 像素串绝不当比例（440 误显回归）", () => {
+  it("真比例（含 named bucket）→ 规范化 W:H", () => {
+    expect(normalizeAspectRatioToWH("16:9")).toBe("16:9");
+    expect(normalizeAspectRatioToWH(" 9：16 ")).toBe("9：16");
+    expect(normalizeAspectRatioToWH("landscape_16_9")).toBe("16:9");
+  });
+
+  it("像素尺寸串 / 非比例值 → null（不显示为比例）", () => {
+    for (const v of ["448x1024", "720x1280", "1024*1024", "2048x2048", "2K", "auto", "", 448]) {
+      expect(normalizeAspectRatioToWH(v as unknown)).toBeNull();
+    }
   });
 });
 
