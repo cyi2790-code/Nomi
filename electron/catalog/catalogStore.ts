@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { isJsonRecord, nowIso, type JsonRecord } from "../jsonUtils";
+import { findNonHeaderSafeChar, isJsonRecord, nowIso, type JsonRecord } from "../jsonUtils";
 import { sanitizeName } from "../projects/repository";
 import { writeJsonFileAtomic } from "../jsonFile";
 import { CATALOG_FILE, getSettingsRoot, readJson } from "../runtimePaths";
@@ -13,7 +13,7 @@ import { CURRENT_CATALOG_VERSION } from "./types";
 
 // 内置 vendor（由 seedBuiltins 管理、op 已正确）。v4 relay 迁移只碰这之外的**用户自建中转**——
 // 尤其别碰 apimart：它的 size 是比例字符串("16:9")不是像素，套 OpenAI 像素转换会发错。
-const BUILTIN_VENDOR_KEYS = new Set(["kie", "apimart", "modelscope", "volcengine", "volcengine-speech"]);
+const BUILTIN_VENDOR_KEYS = new Set(["kie", "apimart", "modelscope", "volcengine", "volcengine-speech", "runninghub"]);
 
 /**
  * v3 → v4：给**用户自建 OpenAI 兼容中转**的旧图像/视频 create op 补 paramMap（铁律翻译层）。
@@ -435,6 +435,14 @@ function applyApiKeyUpsert(state: CatalogState, vendorKey: string, payload: unkn
   const apiKey = String((payload as JsonRecord)?.apiKey || "").trim();
   if (!key) throw new Error("vendor key is required");
   if (!apiKey) throw new Error("api key is required");
+  // 根因守门：密钥含中文/全角/控制字符 → 拼进 HTTP 头后 fetch 直接抛 ByteString 错
+  // （见 findNonHeaderSafeChar）。在唯一写入口就拦掉，污染密钥永远存不进钥匙串。
+  const illegal = findNonHeaderSafeChar(apiKey);
+  if (illegal) {
+    throw new Error(
+      `API Key 含非法字符（第 ${illegal.index + 1} 位「${illegal.char}」，码点 ${illegal.code}）——密钥应为纯英文/数字，常见原因是误把中文或全角字符粘了进来，请重新粘贴。`,
+    );
+  }
   const t = nowIso();
   const existing = state.apiKeysByVendor[key];
   state.apiKeysByVendor[key] = makeApiKeyRecordFromPlain(

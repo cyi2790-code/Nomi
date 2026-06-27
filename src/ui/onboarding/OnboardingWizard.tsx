@@ -9,14 +9,13 @@
  * Backed by: nomiDesktop.onboarding.{listModels, guessKinds, testConnection, manualCommit}。
  */
 import React from 'react'
-import { Stack, Group, Text, PasswordInput, ActionIcon, Anchor, TagsInput, Select, Collapse } from '@mantine/core'
-import { IconPlus, IconTrash, IconCheck, IconX, IconChevronDown, IconChevronRight } from '@tabler/icons-react'
+import { Stack, Group, Text, PasswordInput, ActionIcon, Anchor, TagsInput, Select, Collapse, Loader } from '@mantine/core'
+import { IconPlus, IconTrash, IconCheck, IconX, IconChevronDown, IconChevronRight, IconRefresh, IconAlertTriangle } from '@tabler/icons-react'
 import { DesignButton, DesignModal, DesignTextInput, DesignSegmentedControl } from '../../design'
 import { getDesktopBridge } from '../../desktop/bridge'
 import type { ProviderKind } from '../../desktop/providerKind'
 import { resolveManualSaveAction } from './onboardingSaveGate'
 import { PROVIDER_PRESETS } from './providerPresets'
-import { resolveArchetypeForModel } from '../../config/modelArchetypes'
 import { cn } from '../../utils/cn'
 import { Field } from './onboardingWizardSupport'
 
@@ -77,11 +76,10 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
   const [models, setModels] = React.useState<Array<{ id: string; kind: ModelKind }>>([])
   // Auto-fetched model ids (GET /models) used as TagsInput autocomplete suggestions.
   const [fetchedModels, setFetchedModels] = React.useState<string[]>([])
-  // 中转「只导认得的」：拉到的里 Nomi 认不出档案的（多为杂牌）默认不自动添加，折叠在这，可手动加。
-  const [unrecognizedModels, setUnrecognizedModels] = React.useState<string[]>([])
-  const [showUnrecognized, setShowUnrecognized] = React.useState(false)
   const [fetchingModels, setFetchingModels] = React.useState(false)
   const [fetchModelsMsg, setFetchModelsMsg] = React.useState('')
+  // 失焦自动拉取的去重签名：记录已自动拉过的 baseUrl\0apiKey\0协议，避免每次失焦重拉。
+  const autoFetchSigRef = React.useRef('')
   // Custom request headers (key/value) for relay/proxy gateways. Empty by default
   // so the common case stays clean; the "添加请求头" button reveals a row on demand.
   const [headerRows, setHeaderRows] = React.useState<Array<{ key: string; value: string }>>([])
@@ -146,6 +144,7 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
     setFetchedModels([])
     setFetchModelsMsg('')
     setTestState('idle')
+    autoFetchSigRef.current = ''
   }, [])
 
   // 打开时按 initialPreset 预选（面板「接入你的中转站」卡 → 'newapi'，直接进中转拉取流）。
@@ -185,24 +184,17 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
       })
       if (res.ok && res.models && res.models.length > 0) {
         setFetchedModels(res.models)
-        // 只导认得的（用户拍板）：能匹配 Nomi 档案身份的自动添加；认不出的（中转杂牌）折叠、默认不勾。
-        const already = new Set(models.map(m => m.id))
-        const recognized = res.models.filter(id => resolveArchetypeForModel({ modelKey: id }))
-        const unrecognized = res.models.filter(id => !resolveArchetypeForModel({ modelKey: id }) && !already.has(id))
-        await applyModelIds([...models.map(m => m.id), ...recognized])
-        setUnrecognizedModels(unrecognized)
-        setShowUnrecognized(false)
-        setFetchModelsMsg(
-          unrecognized.length > 0
-            ? `拉到 ${res.models.length} 个：自动添加 ${recognized.length} 个 Nomi 认得的；其余 ${unrecognized.length} 个未识别已折叠，可手动添加`
-            : `拉到 ${res.models.length} 个，已按类型自动分好（可改 / 删）`,
-        )
+        // 全部加入（用户拍板 2026-06-27，反转旧「只导认得的」）：认得的带档案参数、不认得的走
+        // guessKinds 猜类型的通用档，都直接加入并按类型分好——老师拉到即能用，不必再翻折叠手点。
+        // 多余的用下方 TagsInput 的标签 × 删即可。
+        await applyModelIds([...models.map(m => m.id), ...res.models])
+        setFetchModelsMsg(`拉到 ${res.models.length} 个，已全部加入并按类型自动分好（可改 / 删）`)
       } else if (res.ok) {
         setFetchedModels([])
-        setFetchModelsMsg('这个地址没返回模型列表，手填 id 即可')
+        setFetchModelsMsg('这个地址没自动列出模型，可在下方手动输入模型 id，或重新拉取')
       } else {
         setFetchedModels([])
-        setFetchModelsMsg('拉取不到，手填 id 即可')
+        setFetchModelsMsg('没自动拉到模型，可在下方手动输入模型 id，或重新拉取')
       }
     } finally {
       setFetchingModels(false)
@@ -286,6 +278,16 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
     ? (baseUrlTrimmed === '' || /^https?:\/\//i.test(baseUrlTrimmed))
     : /^https?:\/\//i.test(baseUrlTrimmed)
   const canTest = baseUrlValid && (providerKind === 'anthropic' || baseUrlTrimmed.length > 0)
+  // 失焦自动拉取（effect-first）：填完地址+Key 即自动拉这个中转开放的全部模型，不必让用户
+  // 发现并点「拉取」。去重（同 baseUrl+key+协议只拉一次）+ 不覆盖已手填/已拉到的模型。
+  const maybeAutoFetchModels = () => {
+    if (!canTest || fetchingModels) return
+    if (userApiKey.trim().length === 0 || models.length > 0) return
+    const sig = `${baseUrlTrimmed} ${userApiKey.trim()} ${providerKind}`
+    if (sig === autoFetchSigRef.current) return
+    autoFetchSigRef.current = sig
+    void handleFetchModels()
+  }
   const hasModelId = models.some(m => m.id.trim().length > 0)
   // 非阻断门槛（R3 拍板）：字段齐即可保存；测试未通过走二次确认（arm→confirm），不死拦。
   const manualFieldsReady = baseUrlValid && userApiKey.trim().length > 0 && hasModelId && !saving
@@ -377,6 +379,7 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
                   }}
                   placeholder={providerKind === 'anthropic' ? 'https://api.anthropic.com（可留空）' : 'https://api.openai.com/v1'}
                   error={baseUrlTrimmed.length > 0 && !baseUrlValid ? '需以 http:// 或 https:// 开头' : undefined}
+                  onBlur={maybeAutoFetchModels}
                 />
               </Field>
             ) : (
@@ -391,6 +394,7 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
               <PasswordInput
                 value={userApiKey}
                 onChange={e => { setUserApiKey(e.currentTarget.value); setTestState('idle') }}
+                onBlur={maybeAutoFetchModels}
                 placeholder="sk-..."
                 autoFocus
               />
@@ -403,24 +407,54 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
 
             <Stack gap={4}>
               <Group justify="space-between" align="center">
-                <Text size="sm" c="var(--nomi-ink)">模型</Text>
+                <Group gap={6} align="center" wrap="nowrap">
+                  <Text size="sm" c="var(--nomi-ink)">模型</Text>
+                  {models.length > 0 && (
+                    <Group gap={3} align="center" wrap="nowrap">
+                      <IconCheck size={13} stroke={1.5} style={{ color: 'var(--workbench-success)' }} />
+                      <Text size="xs" c="var(--workbench-success)">已添加 {models.length} 个</Text>
+                    </Group>
+                  )}
+                </Group>
+                {/* P1 删旧：原「拉取可用模型」主动作链接 → 失焦自动拉取后降级为「重新拉取」补充入口。 */}
                 <DesignButton
                   variant="subtle"
+                  leftSection={<IconRefresh size={13} />}
                   onClick={handleFetchModels}
                   disabled={!canTest || fetchingModels}
                   loading={fetchingModels}
                 >
-                  拉取可用模型
+                  重新拉取
                 </DesignButton>
               </Group>
-              <TagsInput
-                value={models.map(m => m.id)}
-                onChange={value => { void applyModelIds(value) }}
-                data={fetchedModels}
-                placeholder={models.length === 0 ? '输入模型 id 回车，或先拉取可用模型' : undefined}
-                splitChars={[',', ' ', '\n']}
-              />
-              {fetchModelsMsg && <Text size="xs" c="var(--nomi-ink-60)">{fetchModelsMsg}</Text>}
+              {fetchingModels && models.length === 0 ? (
+                // 加载态（失焦自动拉取替用户干活）：明确告诉他「我没点但它在转」是正常的。
+                <div className="flex items-center gap-2.5 rounded-nomi border border-nomi-line px-3.5 py-3">
+                  <Loader size="xs" />
+                  <Text size="sm" c="var(--nomi-ink-60)">正在拉取这个地址开放的模型…</Text>
+                </div>
+              ) : (
+                <>
+                  <TagsInput
+                    value={models.map(m => m.id)}
+                    onChange={value => { void applyModelIds(value) }}
+                    data={fetchedModels}
+                    placeholder={models.length === 0 ? '模型会自动拉取；也可手动输入 id 回车补充' : undefined}
+                    splitChars={[',', ' ', '\n']}
+                  />
+                  {/* 自动拉取失败/为空 → 不静默：人话 + 手填 TagsInput 就地可用（无缝退化为手动）。 */}
+                  {fetchModelsMsg && (
+                    models.length === 0 ? (
+                      <Group gap={6} align="flex-start" wrap="nowrap">
+                        <IconAlertTriangle size={13} stroke={1.5} style={{ color: 'var(--nomi-ink-60)', flexShrink: 0, marginTop: 2 }} />
+                        <Text size="xs" c="var(--nomi-ink-60)">{fetchModelsMsg}</Text>
+                      </Group>
+                    ) : (
+                      <Text size="xs" c="var(--nomi-ink-60)">{fetchModelsMsg}</Text>
+                    )
+                  )}
+                </>
+              )}
               {/* 每个模型一行：id + 类型（自动判，可改）。删除经上方 TagsInput 的标签 x。 */}
               {models.length > 0 && (
                 <Stack gap={6} mt={4}>
@@ -439,38 +473,6 @@ export function OnboardingWizard({ opened, onClose, onCommitted, initialPreset }
                       />
                     </Group>
                   ))}
-                </Stack>
-              )}
-              {/* 「只导认得的」其余折叠：未识别模型默认不勾，点开手动添加（不丢任何模型）。 */}
-              {unrecognizedModels.length > 0 && (
-                <Stack gap={6}>
-                  <Anchor
-                    component="button"
-                    type="button"
-                    onClick={() => setShowUnrecognized(v => !v)}
-                    style={{ fontSize: 12, color: 'var(--nomi-ink-60)', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                  >
-                    {showUnrecognized ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-                    其余 {unrecognizedModels.length} 个未识别模型（多为中转杂牌）
-                  </Anchor>
-                  <Collapse in={showUnrecognized}>
-                    <Group gap={6} wrap="wrap">
-                      {unrecognizedModels.map(id => (
-                        <DesignButton
-                          key={id}
-                          variant="subtle"
-                          size="xs"
-                          leftSection={<IconPlus size={12} />}
-                          onClick={() => {
-                            void applyModelIds([...models.map(m => m.id), id])
-                            setUnrecognizedModels(prev => prev.filter(x => x !== id))
-                          }}
-                        >
-                          {id}
-                        </DesignButton>
-                      ))}
-                    </Group>
-                  </Collapse>
                 </Stack>
               )}
             </Stack>

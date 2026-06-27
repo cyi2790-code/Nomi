@@ -8,7 +8,7 @@ import {
   authQueryParams as buildAuthQueryParams,
   looksLikeLogicalError,
 } from "../ai/requestPipeline";
-import { firstString, isJsonRecord, readNestedRecord } from "../jsonUtils";
+import { describeIllegalHeader, findIllegalHeader, firstString, isJsonRecord, readNestedRecord } from "../jsonUtils";
 import type { Vendor } from "../catalog/types";
 
 export type VendorErrorCategory = "auth" | "balance" | "quota" | "input" | "server" | "network" | "unknown";
@@ -90,6 +90,21 @@ export async function requestJson(
   const finalUrl = appendQueryParams(url, { ...authQueryParams(vendor, apiKey), ...query });
   const upperMethod = method.toUpperCase();
   const hasBody = upperMethod !== "GET" && upperMethod !== "HEAD" && body != null;
+  // 发送前请求头守卫：fetch 遇到码点 > 255 的头值会同步抛 ByteString 错，被下面 catch
+  // 误判成「网络超时」让用户白查网络（最常见来源=密钥混进中文/全角字符）。在这里先识别，
+  // 抛 auth 类（不可重试）+ 说人话的 upstreamMsg，让错误卡指向「重新粘贴密钥」而非网络。
+  const headerProblem = findIllegalHeader(headers);
+  if (headerProblem) {
+    const { isAuth, message: upstreamMsg } = describeIllegalHeader(headerProblem);
+    throw new VendorRequestError(`Provider request rejected (invalid header) at ${vendor.key} ${upperMethod} ${url}: ${upstreamMsg}`, {
+      vendorKey: vendor.key,
+      method: upperMethod,
+      url,
+      upstreamMsg,
+      category: isAuth ? "auth" : "input",
+      retryable: false,
+    });
+  }
   const timeoutMs = vendorHttpTimeoutMs();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
