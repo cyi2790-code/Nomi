@@ -22,8 +22,9 @@ const trunc = (value: unknown, max = 40): string => {
 /** 边类偏差:where 已是「源标题」→「目标标题」,正文不再重复 field。 */
 const isEdgeField = (field: string): boolean => field === '引用边' || field === '边语义'
 
-/** 一条偏差的人话正文:边→为什么没接上;其余→批准 vs 实际。 */
+/** 一条偏差的人话正文:内容(画面校验)→直接显原因;边→为什么没接上;其余结构→批准 vs 实际。 */
 function detailLine(d: ReconcileDeviation): string {
+  if (d.kind === 'content') return d.reason ? String(d.reason) : `画面与设定对不上(${trunc(d.actual)})`
   if (d.field === '引用边') return d.reason ? `没接上 · ${d.reason}` : '这条连接没接上'
   if (d.field === '边语义') return `连接方式落地成了「${trunc(d.actual)}」，批准的是「${trunc(d.expected)}」`
   if (d.field === '节点') return `${trunc(d.expected)} → ${trunc(d.actual)}`
@@ -36,6 +37,12 @@ function detailLine(d: ReconcileDeviation): string {
  */
 export default function ReconcileDeviationCard({ deviations, onUndoAll, onDismiss, onAiFix, flat = false }: ReconcileDeviationCardProps): JSX.Element {
   const hasEdgeMiss = deviations.some((d) => d.field === '引用边')
+  const hasContentMiss = deviations.some((d) => d.kind === 'content')
+  // 「让 AI 修」对结构边丢失=重连边;对画面偏差=回灌改分镜重做(Stage 2)。两类都给入口。
+  const showAiFix = hasEdgeMiss || hasContentMiss
+  const captionText = hasContentMiss
+    ? '这条分镜的画面校验完了——下面这几镜跟设定/描述对不上，其它镜都正常。'
+    : '你批准的计划里，下面这些没按计划生效；其它节点都已正常应用。'
   return (
     <div
       className={cn('flex flex-col gap-2', flat ? '' : 'p-3 rounded-nomi border border-nomi-line bg-nomi-paper')}
@@ -43,7 +50,7 @@ export default function ReconcileDeviationCard({ deviations, onUndoAll, onDismis
       aria-label="执行与批准的出入"
     >
       <div className={cn('text-caption text-nomi-ink-60')}>
-        你批准的计划里，下面这些没按计划生效；其它节点都已正常应用。
+        {captionText}
       </div>
       <ul className={cn('flex flex-col gap-1 list-none p-0 m-0')}>
         {deviations.map((deviation, index) => (
@@ -58,7 +65,7 @@ export default function ReconcileDeviationCard({ deviations, onUndoAll, onDismis
       </ul>
       {/* flex-wrap + shrink-0:三个按钮在窄面板放不下时整组换行(AI 修一行、保持/撤销一行),不挤压不竖排。 */}
       <div className={cn('flex flex-wrap items-center gap-2')}>
-        {onAiFix && hasEdgeMiss ? (
+        {onAiFix && showAiFix ? (
           <WorkbenchButton className={cn('shrink-0')} variant="accent" size="sm" data-reconcile-ai-fix="true" onClick={onAiFix}>
             让 AI 修一下
           </WorkbenchButton>

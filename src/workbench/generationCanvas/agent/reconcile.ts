@@ -14,6 +14,15 @@ export type ReconcileDeviation = {
   actual: unknown
   /** 边没连上的人话原因(来自执行侧 skippedEdges:能力不支持/源不可参考/找不到节点)。 */
   reason?: string
+  /**
+   * 偏差类别(缺省=structure):
+   * - structure：本文件结构对账产出(批准 vs 搭出来:连线/字段/模型/参数),detailLine 走「批准 vs 实际」;
+   * - content：镜级画面校验(shotVerify)产出(身份/构图/连贯),detailLine 直接显 reason 人话,不套「批准 vs 实际」。
+   * 两类共用同一张对账卡,但语气不同(结构=没按计划落地;内容=画面跟设定对不上)。
+   */
+  kind?: 'structure' | 'content'
+  /** content 偏差回指的镜头节点 id(Stage 2 闭环据此决定回灌/重生哪几镜);structure 偏差不填。 */
+  shotNodeId?: string
 }
 
 /** 执行侧 skip 原因码 → 人话(给对账卡显示「为什么没接上」)。 */
