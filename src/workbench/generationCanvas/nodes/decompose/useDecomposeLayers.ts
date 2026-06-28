@@ -9,7 +9,7 @@ import { inferWhiteboardAspectRatio } from '../whiteboard/whiteboardState'
 import { buildLayerWhiteboardState } from './buildLayerWhiteboard'
 import { confirmAndMintGrant, describeGenerationCost } from '../../spend/spendConfirm'
 import { getDesktopBridge } from '../../../../desktop/bridge'
-import { persistNodeImageFile } from '../../adapters/persistNodeImage'
+import { getDesktopActiveProjectId } from '../../../../desktop/activeProject'
 import { toast } from '../../../../ui/toast'
 
 const DECOMPOSE_LAYERS = 6
@@ -40,21 +40,17 @@ export function useDecomposeLayers(node: GenerationCanvasNode, imageUrl: string)
     try {
       const bridge = getDesktopBridge()
       if (!bridge) throw new Error('桌面端不可用')
-      const { layers } = await bridge.image.decomposeLayers({ nodeId: node.id, imageUrl, numLayers: DECOMPOSE_LAYERS, grantId })
+      // 主进程已就地把图层落盘成 nomi-local（传 projectId 触发），渲染层拿到即用、秒开白板。
+      const { layers } = await bridge.image.decomposeLayers({
+        nodeId: node.id,
+        imageUrl,
+        numLayers: DECOMPOSE_LAYERS,
+        grantId,
+        projectId: getDesktopActiveProjectId() || undefined,
+      })
       if (!layers || layers.length === 0) throw new Error('拆解未返回图层')
-      // 远端图层（临时直链）逐张落地成 nomi-local（同 removeBackground 落盘套路）。
-      const localUrls = await Promise.all(layers.map(async (url, index) => {
-        try {
-          const resp = await fetch(url)
-          const blob = await resp.blob()
-          const file = new File([blob], `decompose-${node.id}-${index}.png`, { type: 'image/png' })
-          return (await persistNodeImageFile(file, node.id)) || url
-        } catch {
-          return url
-        }
-      }))
       const ratio = inferWhiteboardAspectRatio(node.meta?.imageWidth, node.meta?.imageHeight)
-      setDecomposeState(buildLayerWhiteboardState(localUrls, ratio))
+      setDecomposeState(buildLayerWhiteboardState(layers, ratio))
       toast('已拆成图层，拖动元素后关闭画板即合成回图', 'success')
     } catch (error) {
       toast(error instanceof Error && error.message ? error.message : '拆解失败，请稍后重试', 'error')
