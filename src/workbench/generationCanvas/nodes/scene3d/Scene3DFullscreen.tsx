@@ -33,7 +33,7 @@ import {
   FULLSCREEN_Z_INDEX,
   type CrowdAddOptions,
 } from './scene3dConstants'
-import { PanelButton, CanvasPanelRestoreButton, SceneAddToolbar } from './scene3dToolbar'
+import { PanelButton, CanvasPanelRestoreButton } from './scene3dToolbar'
 import {
   cameraLookAtRotation,
   levelEditorCameraRotation,
@@ -49,6 +49,8 @@ import { SceneObjectList } from './scene3dInspector'
 import { TrajectoryListPanel } from './scene3dTrajectoryListPanel'
 import { nextAvailableObjectPosition } from './scene3dObjects'
 import { SceneContent } from './scene3dSceneContent'
+import { CharacterPossessButton, Scene3DBottomBar } from './scene3dCharacterActionBar'
+import { useScene3DCharacterDrive } from './useScene3DCharacterDrive'
 import { CameraPreview, PlaybackCameraMonitor } from './scene3dCameraPreview'
 import { useScene3DTrajectoryEditing } from './useScene3DTrajectoryEditing'
 import {
@@ -440,6 +442,17 @@ export default function Scene3DFullscreen({
     })
   }, [patchCamera, readOnly, selectedCamera, trajectory.activeTrajectoryIds, trajectory.playheadRef])
 
+  const characterDrive = useScene3DCharacterDrive({
+    objects: state.objects,
+    selection,
+    readOnly,
+    patchObject,
+    setSelection,
+    setViewLocked,
+    setFocusId,
+    exitTrajectoryMode,
+    exitCameraViewEdit,
+  })
   const {
     selectTrajectoryForMode,
     selectSceneTrajectory,
@@ -474,12 +487,13 @@ export default function Scene3DFullscreen({
   }, [])
 
   const handleClose = React.useCallback(() => {
+    characterDrive.exitPossess()
     trajectory.setTrajectoryEditMode(false)
     trajectory.setTimelineOpen(false)
     trajectory.setIsPlaying(false)
     flushLatestState()
     onClose()
-  }, [flushLatestState, onClose, trajectory])
+  }, [characterDrive, flushLatestState, onClose, trajectory])
 
   useScene3DKeyboardShortcuts({
     cameraViewEditId,
@@ -563,6 +577,7 @@ export default function Scene3DFullscreen({
               {trajectory.isPlaying ? <IconPlayerPause size={15} /> : <IconPlayerPlay size={15} />}
             </PanelButton>
           </div>
+          {!readOnly ? <CharacterPossessButton drive={characterDrive} /> : null}
           <label className="inline-flex h-8 shrink-0 items-center gap-2 rounded-nomi border border-[var(--nomi-line-soft)] bg-[var(--nomi-paper)] px-2 text-caption text-[var(--workbench-muted)]">
             <IconWorld size={14} />
             <span>速度</span>
@@ -645,6 +660,7 @@ export default function Scene3DFullscreen({
               viewLocked={viewLocked}
               cameraViewEditCamera={cameraViewEditCamera}
               trajectoryMode={trajectoryMode}
+              possessedObject={characterDrive.possessedObject}
               onSelect={selectSceneItem}
               onFocus={focusSceneItem}
               onObjectPatch={patchObject}
@@ -727,17 +743,20 @@ export default function Scene3DFullscreen({
               <span className="text-[var(--nomi-axis-z)]">Z</span>
             </div>
           </div>
-          {!readOnly ? (
-            <SceneAddToolbar
-              onAddObject={addObject}
-              onAddCrowd={addCrowd}
-              onAddCamera={addCamera}
-              trajectoryMode={trajectoryMode}
-              onToggleTrajectoryMode={toggleTrajectoryMode}
-              canvasFocusMode={canvasFocusMode}
-              onToggleCanvasFocusMode={toggleCanvasFocusMode}
-            />
-          ) : null}
+          <Scene3DBottomBar
+            readOnly={readOnly}
+            possessedObject={characterDrive.possessedObject}
+            activePresetId={characterDrive.activePresetId}
+            onApplyPreset={characterDrive.applyActionPreset}
+            onExitPossess={characterDrive.exitPossess}
+            onAddObject={addObject}
+            onAddCrowd={addCrowd}
+            onAddCamera={addCamera}
+            trajectoryMode={trajectoryMode}
+            onToggleTrajectoryMode={toggleTrajectoryMode}
+            canvasFocusMode={canvasFocusMode}
+            onToggleCanvasFocusMode={toggleCanvasFocusMode}
+          />
           <Scene3DTrajectoryTimelineBar trajectory={trajectory} readOnly={readOnly} />
         </div>
 
