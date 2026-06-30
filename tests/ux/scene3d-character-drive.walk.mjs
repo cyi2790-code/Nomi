@@ -92,6 +92,10 @@ try {
   const firstMan = win.getByText('假人', { exact: true }).first()
   if ((await firstMan.count()) > 0) { await firstMan.click(); await win.waitForTimeout(800) }
 
+  // #6 自验：选中假人（未 possess）时角色头顶应浮出画布内「操控」按钮（drei Html）。
+  // 截这张图人眼确认按钮贴角色头上，而非只藏右上角顶栏。
+  await win.screenshot({ path: path.join(outDir, 'cd-01b-head-possess-button.png') })
+
   // 点头部「操控」（选中单个假人才出现）
   const possessBtn = win.getByRole('button', { name: '操控', exact: false }).first()
   const possessCount = await possessBtn.count()

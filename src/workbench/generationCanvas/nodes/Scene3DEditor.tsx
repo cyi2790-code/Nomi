@@ -167,10 +167,19 @@ function Scene3DEditor({ node, width, height, readOnly = false }: Scene3DEditorP
     })
   }, [node.id, updateNode])
 
+  // 录过 take → 关编辑器后才请画布 fit（#1 闭环可见性根因：在全屏编辑器盖着画布时 fit 是白跑，
+  // 360ms 后 fitView 时画布不可见/stageRef 未就绪，nonce 又已消费 → 关掉后看到默认视图、找不到新节点。
+  // 改成关闭后再 fit，此时画布可见、新节点已就位，fitView 框全部节点把「录制走位参考」节点带进视口）。
+  const recordedTakeRef = React.useRef(false)
+
   const handleCloseFullscreen = React.useCallback(() => {
     setFullscreen(false)
     void persistActiveWorkbenchProjectNow().catch(() => {})
-  }, [])
+    if (recordedTakeRef.current) {
+      recordedTakeRef.current = false
+      requestCanvasFit()
+    }
+  }, [requestCanvasFit])
 
   // 录 take（S2）：把录制好的（含角色/机位轨迹的）场景另建一个 scene3d 节点 + 打 cameraMoveAutoCapture 标志，
   // 整条出 mp4 + 喂目标镜头 video_ref 复用 AI 运镜常驻 Host（CameraMoveCaptureHost），不另起接缝（P1）。
@@ -189,6 +198,15 @@ function Scene3DEditor({ node, width, height, readOnly = false }: Scene3DEditorP
       kind: 'scene3d',
       title: '录制走位参考',
       prompt: '',
+      // #1 闭环可见性根因：scene3d 的默认分类是 'scene'，但用户正看着的子画布
+      // （source 节点所在分类，常是 'shots'）未必是 'scene'。漏传 categoryId →
+      // 新节点落到另一个子画布 → 既不进当前 activeCategoryId 过滤后的 nodes、也不渲染 DOM，
+      // fitView 只框当前分类的 nodes 永远带不进它（用户看到的就是「录完节点人间蒸发」）。
+      // 让 take 节点继承 source 节点「实际显示所在」的分类，确保它和 source 同屏、fit 能框到。
+      // 用 (node.categoryId || 'shots') 而非裸 node.categoryId：source 是 legacy 无分类节点时
+      // 它按 'shots' 兜底渲染（见 GenerationCanvas 过滤），但 addNode 对 undefined 会退到
+      // scene3d 默认分类 'scene'——直接传 undefined 仍会错位，必须用同一套兜底口径。
+      categoryId: node.categoryId || 'shots',
       position: {
         x: Math.round(node.position.x),
         y: Math.round(node.position.y + height + 80),
@@ -205,11 +223,10 @@ function Scene3DEditor({ node, width, height, readOnly = false }: Scene3DEditorP
         },
       },
     })
-    // 闭环可见性（用户反馈 #1）：新建的「录制走位参考」节点默认落在原节点正下方、常在视口外，
-    // addNode 已自动选中它，这里再请画布「适应视图」一次，把它带进视口（fitView 框全部节点，含新节点）。
-    // 不关编辑器也无妨——画布在编辑器浮层之下、节点已就位，关掉即见到带「生成中→已生成」状态的参考视频节点。
-    requestCanvasFit()
-  }, [addNode, height, node.id, node.position.x, node.position.y, requestCanvasFit, updateNode])
+    // 闭环可见性（#1）：标记本次录过 take；真正的画布 fit 推迟到关闭编辑器后（handleCloseFullscreen），
+    // 因为此刻全屏编辑器盖着画布、fit 是白跑。关掉后画布可见再 fit，把新「录制走位参考」节点带进视口。
+    recordedTakeRef.current = true
+  }, [addNode, height, node.id, node.position.x, node.position.y, updateNode])
 
   const handleScreenshot = React.useCallback(async (capture: Scene3DCaptureResult) => {
     try {
