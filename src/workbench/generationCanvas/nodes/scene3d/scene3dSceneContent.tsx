@@ -255,6 +255,7 @@ export function SceneContent({
         <CharacterDriveController
           possessedObject={possessedObject}
           flySpeed={flySpeed}
+          locomotionClip={possessedLocomotionClip}
           onObjectPatch={onObjectPatch}
           onLocomotionChange={onLocomotionChange}
         />

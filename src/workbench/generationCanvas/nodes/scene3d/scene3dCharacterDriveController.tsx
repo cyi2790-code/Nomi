@@ -32,12 +32,16 @@ const COMMIT_INTERVAL = 0.08 // 节流提交 state 的间隔(秒)，复用 Camer
 export function CharacterDriveController({
   possessedObject,
   flySpeed,
+  locomotionClip,
   onObjectPatch,
   onLocomotionChange,
 }: {
   possessedObject: Scene3DObject
   // header「速度」滑块(1–16，与相机 fly 同一个)。高档 → 地面速度越过 run 阈值播奔跑，低档走路。
   flySpeed: number
+  // 当前 UI locomotion clip：idle/walk/run = 走位态；'' = 用户点了静态动作（蹲/挥手…）→ 停下做动作（#8）。
+  // 由 useScene3DCharacterDrive.applyActionPreset 置空、由本控制器经 onLocomotionChange 重置回 idle/walk/run。
+  locomotionClip?: string
   onObjectPatch: (id: string, patch: Partial<Scene3DObject>) => void
   // 当 locomotion 桶（idle/walk/run）变化时上抛——驱动被操控假人切迈腿动画 clip。仅在桶变化时调用（非每帧）。
   onLocomotionChange?: (clip: string) => void
@@ -47,6 +51,9 @@ export function CharacterDriveController({
   const flySpeedRef = React.useRef(flySpeed)
   flySpeedRef.current = flySpeed
   const locomotionRef = React.useRef<string>(LOCOMOTION_CLIP_IDLE)
+  // #8 静态动作「停下做动作，再走自动接回」：点蹲/挥手等静态动作（locomotionClip='')→ frozen=true，
+  // 该状态下**不推进位移**（治「蹲着滑行」），且清掉按住的走位键，必须一次**新的**走位 keydown 才解冻接回走路。
+  const staticActionFrozenRef = React.useRef(false)
   const objectIdRef = React.useRef(possessedObject.id)
   const groundYRef = React.useRef(possessedObject.position[1])
   const yawRef = React.useRef(possessedObject.rotation[1])
@@ -75,6 +82,19 @@ export function CharacterDriveController({
     groupRef.current = findSceneObjectByRuntimeId(scene, possessedObject.id) as THREE.Group | null
   }, [possessedObject.id, possessedObject.position, possessedObject.rotation, scene])
 
+  // #8：locomotionClip 切到 '' = 用户点了静态动作 → 冻结位移 + 清键（停下做动作，不滑行）。
+  // 切回 idle/walk/run（如本控制器或外部恢复）→ 解冻。
+  React.useLayoutEffect(() => {
+    if (locomotionClip === '') {
+      staticActionFrozenRef.current = true
+      clearMovementKeyState(keyStateRef.current)
+      // 失忆当前桶：解冻后第一次移动必触发桶变化上抛，把 locomotionClip 从 '' 接回 walk/run（否则停在静态姿势）。
+      locomotionRef.current = ''
+    } else if (locomotionClip) {
+      staticActionFrozenRef.current = false
+    }
+  }, [locomotionClip])
+
   React.useEffect(() => {
     const keyState = keyStateRef.current
     const clearKeys = () => clearMovementKeyState(keyState)
@@ -86,6 +106,8 @@ export function CharacterDriveController({
       if (event.code === 'Space' || event.code === 'ShiftLeft' || event.code === 'ShiftRight') return
       event.preventDefault()
       event.stopPropagation()
+      // #8：静态动作冻结中收到「新的」走位 keydown → 解冻，本次按键即起步接回走路（不再滑行残留）。
+      staticActionFrozenRef.current = false
       keyState[event.code] = true
       invalidate()
     }
@@ -113,7 +135,9 @@ export function CharacterDriveController({
     groupRef.current = group
 
     const cameraEuler = cameraEulerRef.current.setFromQuaternion(camera.quaternion, 'YXZ')
-    const direction = groundMoveDirection(keyStateRef.current, cameraEuler.y)
+    // #8：静态动作冻结中 → 不读走位键、不推位移（停下做动作）。等一次新的走位 keydown 解冻接回。
+    const frozen = staticActionFrozenRef.current
+    const direction = frozen ? new THREE.Vector3(0, 0, 0) : groundMoveDirection(keyStateRef.current, cameraEuler.y)
     const moving = direction.lengthSq() > 0
 
     // 自动面向移动方向（平滑插值）；不移动则保持当前朝向。
@@ -130,11 +154,15 @@ export function CharacterDriveController({
     }
 
     // locomotion 桶（idle/walk/run）：由实时地面速度分桶，仅在桶变化时上抛切动画 clip（非每帧，无渲染风暴）。
-    const nextLocomotion = locomotionForSpeed(groundSpeed)
-    if (nextLocomotion !== locomotionRef.current) {
-      locomotionRef.current = nextLocomotion
-      onLocomotionChange?.(nextLocomotion)
-      invalidate()
+    // #8 冻结中不上抛——否则 groundSpeed=0→idle 会把 locomotionClip 从 '' 顶成 'idle'，立刻解掉静态动作。
+    //   保持显示用户点的静态姿势，直到一次新的走位 keydown 解冻、下一帧再正常上抛 walk/run 接回。
+    if (!frozen) {
+      const nextLocomotion = locomotionForSpeed(groundSpeed)
+      if (nextLocomotion !== locomotionRef.current) {
+        locomotionRef.current = nextLocomotion
+        onLocomotionChange?.(nextLocomotion)
+        invalidate()
+      }
     }
 
     // TODO(S1 可选项·相机跟随未做)：操控态下让相机平滑跟在角色身后/上方。S1 暂不做——

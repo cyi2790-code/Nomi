@@ -292,6 +292,31 @@ export function applyMannequinSkeletonPose(root: THREE.Object3D, pose?: Record<s
   root.updateMatrixWorld(true)
 }
 
+// #2 A-hybrid：locomotion 动画态下手臂另走静态「手臂下垂」姿势（腿/髋/脊由 retarget clip 驱动）。
+// 只对手臂链骨（肩/大臂/前臂/手）先复位到 bind rest 再叠加 MANNEQUIN_DEFAULT_POSE 里手臂那组 offset
+// （= 「站立」预设的手臂下垂基准，单一真相源，不另造），不碰腿/髋/脊（那些此刻被 mixer 写着，碰了会打架）。
+// 每帧 mixer.update 后调一次（手臂 offset 是常量，重复叠加幂等：先复位 rest 再加 offset）。
+const ARM_DOWN_BONE_PATTERN = /(Shoulder|Arm|ForeArm|Hand)/
+function isArmDownBoneName(boneName: string): boolean {
+  if (!/(Left|Right)/.test(boneName)) return false
+  return ARM_DOWN_BONE_PATTERN.test(boneName)
+}
+
+export function applyMannequinArmDownPose(root: THREE.Object3D): void {
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Bone)) return
+    if (!isArmDownBoneName(object.name)) return
+    const restRotation = object.userData[MANNEQUIN_REST_ROTATION_KEY] as Scene3DVector3 | undefined
+    if (restRotation) object.rotation.set(restRotation[0], restRotation[1], restRotation[2])
+    const offset = MANNEQUIN_DEFAULT_POSE[normalizeMannequinBoneName(object.name)]
+    if (!offset) return
+    object.rotation.x += offset[0]
+    object.rotation.y += offset[1]
+    object.rotation.z += offset[2]
+  })
+  root.updateMatrixWorld(true)
+}
+
 const MANNEQUIN_GROUND_REF_KEY = 'scene3dGroundRefY'
 const MANNEQUIN_GROUND_BASE_KEY = 'scene3dGroundBaseY'
 

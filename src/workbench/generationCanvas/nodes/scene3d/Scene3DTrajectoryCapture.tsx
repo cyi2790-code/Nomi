@@ -7,10 +7,12 @@
 import React, { Suspense } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
-import { Mannequin, MannequinCrowd, MannequinAssetBoundary, ProceduralMannequin, type MannequinLocomotionDriver } from './scene3dObjects'
-import { captureScene, applySceneCameraPose, aspectDimensions, capCameraMoveDimensions, applyMannequinSkeletonPose, groundMannequinModel } from './scene3dMath'
+import { Mannequin, MannequinCrowd, MannequinAssetBoundary, ProceduralMannequin } from './scene3dObjects'
+import type { MannequinLocomotionDriver } from './scene3dMannequinLocomotion'
+import { captureScene, applySceneCameraPose, aspectDimensions, capCameraMoveDimensions, applyMannequinSkeletonPose, applyMannequinArmDownPose, groundMannequinModel } from './scene3dMath'
 import { cameraWithPlaybackPosition, objectWithPlaybackPose } from './scene3dPlayback'
 import { samplePoseKeyframe, poseKeyframeKey, frameMotionSource } from './scene3dPoseTrack'
+import { locomotionAnimationClip } from './scene3dCharacterDrive'
 import { frameTimes } from './cameraMoveSchedule'
 import type { Scene3DState, Scene3DObject } from './scene3dTypes'
 import { Scene3DEnvironmentLayer } from './scene3dEnvironment'
@@ -46,7 +48,7 @@ function TrajectoryObjects({
               color={object.color || '#808080'}
               pose={object.pose}
               activeClip={object.locomotionClip}
-              driverRef={object.locomotionClip ? driverRefs.get(object.id) : undefined}
+              driverRef={locomotionAnimationClip(object.locomotionClip) ? driverRefs.get(object.id) : undefined}
             />
           )
           : object.type === 'mannequinCrowd'
@@ -63,23 +65,29 @@ function TrajectoryObjects({
   )
 }
 
-// 在时刻 t 把假人骨架摆到 pose-over-time 当前关键帧（仅边界变化时重摆，imperatively，不靠 React 重渲染）。
+// 在时刻 t 把假人骨架摆到「当前生效静态姿势」+ 落地（仅姿势 key 变化时重摆，imperatively，不靠 React 重渲染）。
 // child = 包裹该对象的 group；child.children[0] = Mannequin 挂载的骨架 root（normalizeMannequinModel 产物，
-// 即 Mannequin 组件里 applyMannequinSkeletonPose 的同一 root）。无 poseTrack / 非假人 → 不动（老行为）。
+// 即 Mannequin 组件里 applyMannequinSkeletonPose 的同一 root）。
+// #7：无论有无 poseTrack，静态姿势都**复用实时同一套 groundMannequinModel 落地**——
+//   有 poseTrack → 取该时刻关键帧 pose；无 poseTrack → 用 object.pose（如蹲）。
+//   此前「无 poseTrack 直接 return」使纯静态蹲姿在离屏从不落地 → 导出悬空（用户实测 #7）。
 function applyPoseOverTime(
   object: Scene3DObject,
   t: number,
   child: THREE.Object3D,
   appliedPoseKey: Map<string, string>,
 ): void {
-  if (object.type !== 'mannequin' || !object.poseTrack || object.poseTrack.length === 0) return
-  const keyframe = samplePoseKeyframe(object.poseTrack, t)
-  const key = poseKeyframeKey(keyframe)
+  if (object.type !== 'mannequin') return
+  const hasTrack = Boolean(object.poseTrack && object.poseTrack.length > 0)
+  const keyframe = hasTrack ? samplePoseKeyframe(object.poseTrack!, t) : undefined
+  // 生效 pose：有 track 取关键帧 pose（t 早于首帧 → 落回 object.pose）；无 track → object.pose。
+  const effectivePose = keyframe ? keyframe.pose : object.pose
+  // 缓存键：有 track 用关键帧 key（边界塌合）；无 track 用静态 pose 形状 key（pose 不变只摆一次）。
+  const key = hasTrack ? poseKeyframeKey(keyframe) : poseKeyframeKey({ time: 0, pose: effectivePose })
   if (appliedPoseKey.get(object.id) === key) return
   const mannequinRoot = child.children[0]
   if (!(mannequinRoot instanceof THREE.Group)) return
-  // keyframe 缺省（t 早于首帧）→ 落回静态基准 object.pose。
-  applyMannequinSkeletonPose(mannequinRoot, keyframe ? keyframe.pose : object.pose)
+  applyMannequinSkeletonPose(mannequinRoot, effectivePose)
   groundMannequinModel(mannequinRoot)
   appliedPoseKey.set(object.id, key)
 }
@@ -97,13 +105,19 @@ function applyMotionOverTime(
   driverRefs: Map<string, React.MutableRefObject<MannequinLocomotionDriver | null>>,
 ): void {
   if (object.type !== 'mannequin') return
-  const source = frameMotionSource(object.poseTrack, object.locomotionClip, t)
+  // #9 idle 不靠 clip：把 locomotionClip 经 locomotionAnimationClip 折叠（idle/空 → undefined → 走静态站姿，
+  // 不调 driver），与 Mannequin 内部口径一致；仅 walk/run 才走 locomotion 驱动。
+  const source = frameMotionSource(object.poseTrack, locomotionAnimationClip(object.locomotionClip), t)
   if (source === 'locomotion') {
     const driver = driverRefs.get(object.id)?.current
     if (driver) {
       driver.setTime(t)
       const mannequinRoot = child.children[0]
-      if (mannequinRoot instanceof THREE.Group) groundMannequinModel(mannequinRoot)
+      if (mannequinRoot instanceof THREE.Group) {
+        // #2 A-hybrid：clip 已滤掉手臂链 → 离屏每帧也补「手臂下垂」静态姿势（与 LIVE 同一套）。
+        applyMannequinArmDownPose(mannequinRoot)
+        groundMannequinModel(mannequinRoot)
+      }
     }
     // locomotion 接管期间静态缓存失效：清键，切回静态时强制重摆。
     appliedPoseKey.delete(object.id)
@@ -152,7 +166,7 @@ function TrajectoryFrameStepper({
   const driverRefsRef = React.useRef<Map<string, React.MutableRefObject<MannequinLocomotionDriver | null>>>(new Map())
   const driverRefs = driverRefsRef.current
   state.objects.forEach((object) => {
-    if (object.type === 'mannequin' && object.locomotionClip && !driverRefs.has(object.id)) {
+    if (object.type === 'mannequin' && locomotionAnimationClip(object.locomotionClip) && !driverRefs.has(object.id)) {
       driverRefs.set(object.id, { current: null })
     }
   })

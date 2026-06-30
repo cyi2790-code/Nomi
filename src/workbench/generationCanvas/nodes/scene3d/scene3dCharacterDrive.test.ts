@@ -9,6 +9,8 @@ import {
   applyGroundTranslation,
   locomotionForSpeed,
   groundSpeedForFlySpeed,
+  isArmLocomotionTrackName,
+  locomotionAnimationClip,
   CHARACTER_DRIVE_FLY_SPEED_MIN,
   CHARACTER_DRIVE_FLY_SPEED_MAX,
 } from './scene3dCharacterDrive'
@@ -203,5 +205,51 @@ describe('locomotionForSpeed', () => {
   it('负速取绝对值分桶（速度是标量大小）', () => {
     expect(locomotionForSpeed(-LOCOMOTION_RUN_SPEED_THRESHOLD)).toBe('run')
     expect(locomotionForSpeed(-(LOCOMOTION_WALK_SPEED_THRESHOLD + 0.01))).toBe('walk')
+  })
+})
+
+describe('isArmLocomotionTrackName（#2 手臂链 track 过滤）', () => {
+  it('左右肩/大臂/前臂/手/手指 track 全判为手臂链', () => {
+    for (const bone of [
+      'mixamorigLeftShoulder', 'mixamorigRightShoulder',
+      'mixamorigLeftArm', 'mixamorigRightArm',
+      'mixamorigLeftForeArm', 'mixamorigRightForeArm',
+      'mixamorigLeftHand', 'mixamorigRightHand',
+      'mixamorigLeftHandThumb1', 'mixamorigRightHandIndex3',
+    ]) {
+      expect(isArmLocomotionTrackName(`${bone}.quaternion`)).toBe(true)
+      expect(isArmLocomotionTrackName(`${bone}.position`)).toBe(true)
+    }
+  })
+
+  it('腿/髋/脊/头/颈/脚 track 不判为手臂链（留它们被动画驱动）', () => {
+    for (const bone of [
+      'mixamorigHips', 'mixamorigSpine', 'mixamorigSpine1', 'mixamorigSpine2',
+      'mixamorigNeck', 'mixamorigHead',
+      'mixamorigLeftUpLeg', 'mixamorigRightUpLeg',
+      'mixamorigLeftLeg', 'mixamorigRightLeg',
+      'mixamorigLeftFoot', 'mixamorigRightFoot',
+      'mixamorigLeftToeBase', 'mixamorigRightToeBase',
+    ]) {
+      expect(isArmLocomotionTrackName(`${bone}.quaternion`)).toBe(false)
+    }
+  })
+
+  it('无 Left/Right 前缀的中线骨（即便名里含 Arm 字样的脊椎也不会误命中）', () => {
+    expect(isArmLocomotionTrackName('mixamorigSpine.quaternion')).toBe(false)
+    expect(isArmLocomotionTrackName('mixamorigHips.position')).toBe(false)
+  })
+})
+
+describe('locomotionAnimationClip（#9 idle 不靠 clip）', () => {
+  it('idle / 空 → undefined（走静态站姿路径，不靠推帧）', () => {
+    expect(locomotionAnimationClip('idle')).toBeUndefined()
+    expect(locomotionAnimationClip('')).toBeUndefined()
+    expect(locomotionAnimationClip(undefined)).toBeUndefined()
+  })
+
+  it('walk / run → 原 clip 名（交给 mixer 驱动腿）', () => {
+    expect(locomotionAnimationClip('walk')).toBe('walk')
+    expect(locomotionAnimationClip('run')).toBe('run')
   })
 })

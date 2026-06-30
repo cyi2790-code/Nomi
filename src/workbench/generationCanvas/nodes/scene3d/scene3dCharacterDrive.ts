@@ -98,6 +98,27 @@ export function applyGroundTranslation(
   ]
 }
 
+// #2 A-hybrid：retargetClip 对绕肩手臂链校正差（headless 钉死：walk@0.5s 手-肩 y≈-0.005、横展 0.713
+// = 手臂水平张开退回 bind T-pose），但对绕髋腿/脊链校正好。所以播 locomotion 时**滤掉手臂链的 track**，
+// 只让腿/髋/脊被动画驱动，手臂另由「手臂下垂」静态姿势兜（applyMannequinArmDownPose）。
+// 这个纯字符串谓词判断某条 animation track 是否属于「手臂链」骨（肩/大臂/前臂/手/手指）。
+// track 名形如 "mixamorigLeftArm.quaternion"，取 '.' 前的骨名匹配。颈/头不滤（留它们让头自然摆）。
+const ARM_LOCOMOTION_BONE_PATTERN = /(Shoulder|Arm|ForeArm|Hand)/
+export function isArmLocomotionTrackName(trackName: string): boolean {
+  const boneName = trackName.split('.')[0]
+  if (!/(Left|Right)/.test(boneName)) return false
+  return ARM_LOCOMOTION_BONE_PATTERN.test(boneName)
+}
+
+// #9 idle 不靠 clip：locomotion 桶 = idle 时 demand frameloop 不推帧，idle clip 会冻在 bind T-pose。
+// 改成 idle（及空 clip）→ 返回 undefined，让 Mannequin 走静态「自然站姿」路径（手臂下垂 + 落地，不依赖推帧）；
+// 仅 walk/run 才返回真 clip 名交给 mixer（腿动 + 手臂静态下垂）。纯函数，单测覆盖。
+export function locomotionAnimationClip(locomotionClip: string | undefined): string | undefined {
+  if (!locomotionClip) return undefined
+  if (locomotionClip === LOCOMOTION_CLIP_IDLE) return undefined
+  return locomotionClip
+}
+
 // 把 header「速度」滑块(flySpeed，1–16) 线性映射到角色走位地面速度(米/秒)。
 // 滑块越高走得越快，**高档要越过 run 阈值(3.2)** 触发奔跑、低档保持走路；随滑块连续 derive，不钉死。
 // clamp 到滑块范围后归一化，再在「基速×低端缩放 ~ 基速×高端缩放」间线性插值。
